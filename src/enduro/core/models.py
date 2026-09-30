@@ -69,4 +69,20 @@ class OrderBook:
         return (self.asks[0][0] - self.bids[0][0]) / mid * 1e4
 
 
+@dataclass(frozen=True, slots=True)
+class Candle:
+    """OHLCV bar; `ts` is the bar's open time."""
+
+    exchange: str
+    symbol: str
+    ts: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float  # base currency
+
+
 MarketEvent = Trade | OrderBook
+
+MINUTE_MS = 60_000

@@ -27,8 +27,43 @@ class FlakySource:
         yield OrderBook("fake", "X", 0, 0, bids=((1.0, 1.0),), asks=((2.0, 1.0),))
         await asyncio.Event().wait()
 
+    async def unsubscribe_trades(self, symbols):
+        pass
+
+    async def unsubscribe_order_books(self, symbols):
+        pass
+
     async def close(self) -> None:
         self.closed = True
+
+
+class RecordingSource:
+    """Streams one trade per symbol, then idles; records subscriptions."""
+
+    exchange = "rec"
+
+    def __init__(self) -> None:
+        self.opened: list[tuple[str, ...]] = []
+        self.unsubscribed: list[tuple[str, ...]] = []
+
+    async def stream_trades(self, symbols):
+        self.opened.append(tuple(symbols))
+        for s in symbols:
+            yield Trade("rec", s, 0, 0, price=1.0, amount=1.0, side="buy")
+        await asyncio.Event().wait()
+
+    async def stream_order_books(self, symbols, depth):
+        await asyncio.Event().wait()
+        yield  # pragma: no cover
+
+    async def unsubscribe_trades(self, symbols):
+        self.unsubscribed.append(tuple(symbols))
+
+    async def unsubscribe_order_books(self, symbols):
+        pass
+
+    async def close(self) -> None:
+        pass
 
 
 def test_bus_fans_out_and_drops_oldest():
@@ -64,3 +99,31 @@ async def test_collector_reconnects_and_closes_sources(monkeypatch):
     assert [t.ts for t in trades] == [1, 2, 3]
     assert books == 1
     assert source.closed
+
+
+async def test_collector_switches_symbols_at_runtime():
+    bus = EventBus()
+    queue = bus.subscribe()
+    source = RecordingSource()
+    collector = Collector([source], [], bus)
+    task = asyncio.create_task(collector.run())
+
+    async def next_symbols(n: int) -> list[str]:
+        return [(await asyncio.wait_for(queue.get(), timeout=1)).symbol for _ in range(n)]
+
+    await asyncio.sleep(0.01)
+    assert source.opened == []  # nothing to stream yet
+
+    await collector.set_symbols(["A", "B"])
+    assert await next_symbols(2) == ["A", "B"]
+
+    await collector.set_symbols(["B", "C"])
+    assert await next_symbols(2) == ["B", "C"]
+    await collector.set_symbols(["B", "C"])  # no-op: same set
+
+    await asyncio.sleep(0.01)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert source.opened == [("A", "B"), ("B", "C")]
+    assert source.unsubscribed == [("A",)]
+    assert collector.symbols == ["B", "C"]

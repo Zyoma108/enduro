@@ -5,18 +5,27 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import logging
 import signal
 import sys
+from datetime import UTC, datetime
 
+from enduro.analytics.baseline import load_baselines
 from enduro.analytics.market_state import MarketState
+from enduro.analytics.radar import LOOKBACK_MINUTES, Radar, RadarRow
 from enduro.config import Settings
-from enduro.core.models import now_ms
+from enduro.core.models import MINUTE_MS, Candle, now_ms
 from enduro.data.bus import EventBus
 from enduro.data.ccxt_source import CcxtSource
 from enduro.data.collector import Collector
+from enduro.data.history import backfill
+from enduro.data.universe import UniverseEntry, build_universe
 from enduro.storage import store
+from enduro.storage.candles import last_candle_ts, load_recent_candles, write_candles
 from enduro.storage.parquet_sink import ParquetSink
+
+log = logging.getLogger(__name__)
 
 
 def _cancel_on_shutdown_signals() -> None:
@@ -43,7 +52,7 @@ async def _collect(settings: Settings, interval_s: float) -> None:
             flush_interval_s=storage.flush_interval_s,
             book_interval_ms=storage.book_snapshot_interval_ms,
         )
-        logging.getLogger(__name__).info("recording market data to %s", storage.root.resolve())
+        log.info("recording market data to %s", storage.root.resolve())
 
     async def consume() -> None:
         while True:
@@ -60,6 +69,162 @@ async def _collect(settings: Settings, interval_s: float) -> None:
         tg.create_task(report())
         if sink is not None:
             tg.create_task(sink.run(bus.subscribe(maxsize=100_000)))
+
+
+async def _build_universe(
+    settings: Settings, reference: CcxtSource, execution: CcxtSource
+) -> list[UniverseEntry]:
+    scanner = settings.scanner
+    return await build_universe(
+        reference, execution, scanner.min_quote_volume_usd, scanner.asset_classes
+    )
+
+
+async def _scan_with_signals(settings: Settings, top: int, as_json: bool, once: bool) -> None:
+    _cancel_on_shutdown_signals()
+    await _scan(settings, top, as_json, once)
+
+
+async def _universe(settings: Settings) -> None:
+    market = settings.market
+    reference = CcxtSource(market.reference_exchange, market_type=market.market_type)
+    execution = CcxtSource(market.execution_exchange, market_type=market.market_type)
+    try:
+        entries = await _build_universe(settings, reference, execution)
+    finally:
+        await asyncio.gather(reference.close(), execution.close())
+    for i, e in enumerate(entries, 1):
+        print(f"{i:>3}  {e.symbol:<22} ${e.quote_volume_24h / 1e6:>10.1f}M")
+    print(
+        f"{len(entries)} symbols on {market.reference_exchange} ∩ {market.execution_exchange} "
+        f"with 24h volume >= ${settings.scanner.min_quote_volume_usd / 1e6:.0f}M"
+    )
+
+
+async def _backfill(settings: Settings, days: int) -> None:
+    market, root = settings.market, settings.storage.root
+    exchanges = [market.reference_exchange, market.execution_exchange]
+    sources = [CcxtSource(ex, market_type=market.market_type) for ex in exchanges]
+    try:
+        entries = await _build_universe(settings, sources[0], sources[1])
+        symbols = [e.symbol for e in entries]
+        now = now_ms()
+        start = now - days * 86_400_000
+        log.info("backfilling %d days of 1m candles for %d symbols", days, len(symbols))
+
+        async def run(source: CcxtSource) -> None:
+            done = 0
+
+            async def persist(symbol: str, candles: list) -> None:
+                nonlocal done
+                await asyncio.to_thread(write_candles, root, candles)
+                done += 1
+                if done % 10 == 0:
+                    log.info("%s: %d symbols updated", source.exchange, done)
+
+            last = await asyncio.to_thread(last_candle_ts, root, source.exchange)
+            total = await backfill(source, symbols, last, start, now, persist)
+            log.info("%s: done, %d candles written", source.exchange, total)
+
+        await asyncio.gather(*(run(src) for src in sources))
+    finally:
+        await asyncio.gather(*(src.close() for src in sources))
+
+
+RADAR_PERSIST_EVERY_MS = 60 * MINUTE_MS
+
+
+async def _scan(settings: Settings, top: int, as_json: bool, once: bool) -> None:
+    market, root = settings.market, settings.storage.root
+    reference = CcxtSource(market.reference_exchange, market_type=market.market_type)
+    execution = CcxtSource(market.execution_exchange, market_type=market.market_type)
+    pending: list[Candle] = []
+    try:
+        symbols = [e.symbol for e in await _build_universe(settings, reference, execution)]
+        now = now_ms()
+
+        # Bring stored history up to date first, so candles the radar persists later
+        # continue it without gaps.
+        last = await asyncio.to_thread(last_candle_ts, root, reference.exchange)
+        history_start = now - settings.scanner.history_days * 86_400_000
+
+        async def persist(symbol: str, candles: list[Candle]) -> None:
+            await asyncio.to_thread(write_candles, root, candles)
+
+        await backfill(reference, symbols, last, history_start, now, persist)
+
+        baselines = await asyncio.to_thread(load_baselines, root, reference.exchange, history_start)
+        missing = [s for s in symbols if s not in baselines]
+        if missing:
+            log.warning("no baseline (history) for %d symbols: %s", len(missing), missing)
+        radar = Radar(baselines, round_trip_fee=2 * settings.scanner.taker_fee_bps / 1e4)
+        since = now - LOOKBACK_MINUTES * MINUTE_MS
+        radar.add(
+            await asyncio.to_thread(load_recent_candles, root, reference.exchange, symbols, since)
+        )
+
+        def collect(symbol: str, candles: list[Candle]) -> None:
+            radar.add(candles)
+            pending.extend(candles)
+
+        last_persist = now
+        while True:
+            now = now_ms()
+            await backfill(
+                reference,
+                symbols,
+                radar.last_ts(),
+                now - LOOKBACK_MINUTES * MINUTE_MS,
+                now,
+                collect,
+            )
+            rows = radar.scan(symbols)[:top]
+            if as_json:
+                print(json.dumps([r.to_summary() for r in rows], ensure_ascii=False), flush=True)
+            else:
+                print(_render_radar(rows, reference.exchange, len(symbols)), flush=True)
+            if once:
+                break
+            if now - last_persist >= RADAR_PERSIST_EVERY_MS and pending:
+                batch = pending.copy()
+                pending.clear()
+                await asyncio.to_thread(write_candles, root, batch)
+                last_persist = now
+            # Wake a few seconds after the next minute closes, when exchanges have the candle.
+            next_minute = (now_ms() // MINUTE_MS + 1) * MINUTE_MS
+            await asyncio.sleep((next_minute - now_ms()) / 1000 + 3)
+    finally:
+        if pending:
+            write_candles(root, pending)
+        await asyncio.gather(reference.close(), execution.close())
+
+
+def _render_radar(rows: list[RadarRow], exchange: str, universe_size: int) -> str:
+    def f(x: float, fmt: str) -> str:
+        return "—" if x != x else format(x, fmt)  # NaN-safe
+
+    stamp = datetime.fromtimestamp((rows[0].ts if rows else now_ms()) / 1000 + 60, UTC)
+    lines = [
+        f"=== {stamp:%H:%M} UTC | radar on {exchange} | {universe_size} symbols | "
+        "sorted by score = sqrt(vol_x * vlm_x) over 15m vs usual",
+        "    usual = norm for this hour over weeks; 24h = vs the last day; "
+        "day = 24h volume vs usual (in play?)",
+        f"{'#':>2} {'symbol':<14}{'price':>11}{'score':>7}{'day':>6} │"
+        f"{'15m chg':>9}{'move':>7}{'vol_x':>6}{'vlm_x':>6}{'v/24h':>6}{'eff':>6} │"
+        f"{'1h chg':>8}{'eff':>6} │{'exp':>6}{'atr5m':>7}{'mv/fee':>7}",
+    ]
+    for i, r in enumerate(rows, 1):
+        a, b = r.windows["15m"], r.windows["1h"]
+        lines.append(
+            f"{i:>2} {r.symbol.split('/')[0]:<14}{r.price:>11.6g}{f(r.score, '.1f'):>7}"
+            f"{f(r.day_volume_ratio, '.1f'):>6} │"
+            f"{f(a.change * 100, '+.2f'):>8}%{f(a.expected_move * 100, '.2f'):>6}%"
+            f"{f(a.vol_ratio, '.1f'):>6}{f(a.volume_ratio, '.1f'):>6}"
+            f"{f(a.volume_vs_24h, '.1f'):>6}{f(a.efficiency, '.2f'):>6} │"
+            f"{f(b.change * 100, '+.2f'):>7}%{f(b.efficiency, '.2f'):>6} │"
+            f"{f(r.expansion, '.2f'):>6}{f(r.atr_5m * 100, '.2f'):>6}%{f(r.move_vs_fees, '.1f'):>7}"
+        )
+    return "\n".join(lines)
 
 
 def _render(state: MarketState, settings: Settings, dropped: int, sink: ParquetSink | None) -> str:
@@ -99,6 +264,16 @@ def main() -> None:
     collect.add_argument("--interval", type=float, default=5.0, help="report interval, seconds")
     collect.add_argument("--no-record", action="store_true", help="do not write data to disk")
 
+    commands.add_parser("universe", help="list symbols the radar scans")
+
+    fill = commands.add_parser("backfill", help="download/update 1m candle history")
+    fill.add_argument("--days", type=int, help="history depth (default: scanner.history_days)")
+
+    scan = commands.add_parser("scan", help="rank the market by unusual activity, every minute")
+    scan.add_argument("--top", type=int, default=15, help="rows to show")
+    scan.add_argument("--json", action="store_true", help="print agent-facing JSON")
+    scan.add_argument("--once", action="store_true", help="scan once and exit")
+
     sql = commands.add_parser("sql", help="query recorded data (views: trades, books)")
     sql.add_argument("query", help='e.g. "select exchange, count(*) from trades group by 1"')
 
@@ -116,6 +291,13 @@ def main() -> None:
             settings.storage.enabled = False
         with contextlib.suppress(asyncio.CancelledError):
             asyncio.run(_collect(settings, args.interval))
+    elif args.command == "universe":
+        asyncio.run(_universe(settings))
+    elif args.command == "backfill":
+        asyncio.run(_backfill(settings, args.days or settings.scanner.history_days))
+    elif args.command == "scan":
+        with contextlib.suppress(asyncio.CancelledError):
+            asyncio.run(_scan_with_signals(settings, args.top, args.json, args.once))
     elif args.command == "sql":
         try:
             store.connect(settings.storage.root).sql(args.query).show(max_rows=100)

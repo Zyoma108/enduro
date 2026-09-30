@@ -11,6 +11,7 @@ making structural changes — it records the agreed principles and open question
 - Lint/format: `.venv/bin/ruff check . && .venv/bin/ruff format .`
 - Live data smoke test: `.venv/bin/enduro collect --symbols BTC/USDT:USDT --interval 2 --no-record`
 - Query recorded data: `.venv/bin/enduro sql "select count(*) from trades"`
+- Radar: `.venv/bin/enduro universe`, `.venv/bin/enduro backfill`, `.venv/bin/enduro scan --once`
 
 ## Layout
 
@@ -30,3 +31,5 @@ making structural changes — it records the agreed principles and open question
 - Secrets only via env / `.env` (`ENDURO_*`), never in `config.toml` or code.
 - Docs (README, ARCHITECTURE) are in Russian; code, docstrings and comments in English.
 - Never place real orders in tests or during development without explicit user approval.
+- The user may run `enduro collect` continuously into `data/`: use `--no-record` for your own
+  smoke tests so you don't write duplicate data into their store.

@@ -21,8 +21,13 @@ python3 -m venv .venv
 .venv/bin/enduro collect
 .venv/bin/enduro collect --symbols BTC/USDT:USDT --interval 2
 
-# SQL по записанным данным (представления trades и books)
+# SQL по записанным данным (представления trades, books, candles)
 .venv/bin/enduro sql "select exchange, symbol, count(*) from trades group by all"
+
+# Радар: какие монеты сейчас необычно активны
+.venv/bin/enduro universe          # список монет, которые сканируем
+.venv/bin/enduro backfill          # загрузить/дополнить 28 дней минутных свечей
+.venv/bin/enduro scan              # обновление раз в минуту (--once, --json, --top N)
 ```
 
 Настройки — в `config.toml`, секреты — только через переменные окружения / `.env`

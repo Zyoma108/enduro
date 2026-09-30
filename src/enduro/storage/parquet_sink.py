@@ -17,9 +17,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from enduro.core.models import MarketEvent, OrderBook, Trade
+from enduro.storage.files import write_parquet_atomic
 
 log = logging.getLogger(__name__)
 
@@ -143,6 +143,6 @@ class ParquetSink:
             table = pa.Table.from_pylist(rows, schema=schema).sort_by(
                 [("symbol", "ascending"), ("ts", "ascending")]
             )
-            pq.write_table(table, path, compression="zstd")
+            write_parquet_atomic(table, path)
             self.rows_written += len(rows)
             log.debug("wrote %d %s rows to %s", len(rows), kind, path)

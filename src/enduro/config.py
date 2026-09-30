@@ -41,6 +41,17 @@ class StorageConfig(BaseModel):
     book_snapshot_interval_ms: int = Field(default=1_000, ge=0)
 
 
+class ScannerConfig(BaseModel):
+    # Minimum 24h volume on the execution exchange (USDT) for a symbol to enter the radar.
+    min_quote_volume_usd: float = Field(default=10_000_000, ge=0)
+    # "crypto" and/or "tradfi" (tokenized stocks, ETFs, commodities, FX, pre-IPO).
+    asset_classes: list[Literal["crypto", "tradfi"]] = Field(default_factory=lambda: ["crypto"])
+    # Candle history used to compute "normal" volatility and volume per hour of day.
+    history_days: int = Field(default=28, ge=1)
+    # Taker fee on the execution exchange, bps per side (Bybit VIP0 perps: 5.5).
+    taker_fee_bps: float = Field(default=5.5, ge=0)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="ENDURO_",
@@ -52,6 +63,7 @@ class Settings(BaseSettings):
 
     market: MarketConfig = Field(default_factory=MarketConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
+    scanner: ScannerConfig = Field(default_factory=ScannerConfig)
 
     @classmethod
     def settings_customise_sources(
