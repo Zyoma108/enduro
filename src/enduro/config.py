@@ -6,6 +6,7 @@ Secrets must only come from env / .env, never from config.toml.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
@@ -33,6 +34,13 @@ class MarketConfig(BaseModel):
         return self
 
 
+class StorageConfig(BaseModel):
+    enabled: bool = True
+    root: Path = Path("data")
+    flush_interval_s: float = Field(default=60.0, gt=0)
+    book_snapshot_interval_ms: int = Field(default=1_000, ge=0)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="ENDURO_",
@@ -43,6 +51,7 @@ class Settings(BaseSettings):
     )
 
     market: MarketConfig = Field(default_factory=MarketConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
 
     @classmethod
     def settings_customise_sources(

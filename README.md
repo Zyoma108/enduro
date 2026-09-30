@@ -16,9 +16,13 @@
 python3 -m venv .venv
 .venv/bin/pip install -e . --group dev
 
-# Живой поток данных с Binance и Bybit со сводкой каждые 5 секунд
+# Живой поток данных с Binance и Bybit со сводкой каждые 5 секунд.
+# Поток пишется в data/ (Parquet); --no-record — без записи.
 .venv/bin/enduro collect
 .venv/bin/enduro collect --symbols BTC/USDT:USDT --interval 2
+
+# SQL по записанным данным (представления trades и books)
+.venv/bin/enduro sql "select exchange, symbol, count(*) from trades group by all"
 ```
 
 Настройки — в `config.toml`, секреты — только через переменные окружения / `.env`

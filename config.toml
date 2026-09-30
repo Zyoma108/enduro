@@ -13,3 +13,12 @@ market_type = "swap"
 symbols = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
 # Сколько уровней стакана хранить в каждом снимке.
 book_depth = 20
+
+[storage]
+# Запись потока в Parquet (data/ в .gitignore).
+enabled = true
+root = "data"
+# Как часто сбрасывать буфер на диск, секунды.
+flush_interval_s = 60
+# Снимки стакана прореживаются до одного в этот интервал на (биржу, символ). 0 — писать все.
+book_snapshot_interval_ms = 1000

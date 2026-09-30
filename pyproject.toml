@@ -6,8 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "ccxt>=4.5",
+    "duckdb>=1.2",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
+    "pyarrow>=19",
 ]
 
 [project.scripts]
