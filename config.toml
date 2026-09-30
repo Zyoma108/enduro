@@ -1,0 +1,15 @@
+# Базовая конфигурация Enduro. Секреты сюда не кладём — только через env / .env.
+
+[market]
+# Биржи, с которых собираем данные.
+exchanges = ["binance", "bybit"]
+# Источник правды для сигналов — биржа с наибольшим объёмом.
+reference_exchange = "binance"
+# Биржа, на которой исполняем сделки.
+execution_exchange = "bybit"
+# "swap" — бессрочные фьючерсы (USDT-маржинальные), "spot" — спот.
+market_type = "swap"
+# Унифицированные символы ccxt. Для USDT-perp формат BASE/USDT:USDT.
+symbols = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+# Сколько уровней стакана хранить в каждом снимке.
+book_depth = 20
