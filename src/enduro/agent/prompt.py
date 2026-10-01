@@ -20,7 +20,13 @@ ENVIRONMENT_NOTES = {
 }
 
 
-def render_prompt(path: Path, limits: RiskLimits, taker_fee_bps: float, environment: str) -> str:
+def render_prompt(
+    path: Path,
+    limits: RiskLimits,
+    taker_fee_bps: float,
+    environment: str,
+    min_check_flat_s: int = 120,
+) -> str:
     def fmt(x: float) -> str:
         return f"{x:g}"
 
@@ -33,4 +39,5 @@ def render_prompt(path: Path, limits: RiskLimits, taker_fee_bps: float, environm
         max_drawdown_pct=fmt(limits.max_drawdown_pct),
         taker_fee_pct=fmt(taker_fee_bps / 100),
         environment_note=ENVIRONMENT_NOTES[environment],
+        min_check_flat_s=min_check_flat_s,
     )

@@ -396,6 +396,7 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
             risk.limits,
             settings.scanner.taker_fee_bps,
             settings.execution.environment,
+            min_check_flat_s=agent_cfg.min_check_flat_s,
         )
         runtime = AgentRuntime(
             llm=llm,
@@ -416,6 +417,7 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
                 wake_flat_multiplier=agent_cfg.wake_flat_multiplier,
                 min_wake_gap_flat_s=agent_cfg.min_wake_gap_flat_s,
                 min_wake_gap_position_s=agent_cfg.min_wake_gap_position_s,
+                min_check_flat_s=agent_cfg.min_check_flat_s,
             ),
             universe=symbols,
             reference=market.reference_exchange,

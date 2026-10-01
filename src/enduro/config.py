@@ -96,6 +96,7 @@ class AgentSettings(BaseModel):
     wake_flat_multiplier: float = Field(default=2.0, ge=1)
     min_wake_gap_flat_s: int = Field(default=60, ge=0)
     min_wake_gap_position_s: int = Field(default=15, ge=0)
+    min_check_flat_s: int = Field(default=120, ge=15)
 
 
 class ApiKey(BaseModel):

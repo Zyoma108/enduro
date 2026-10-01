@@ -66,6 +66,7 @@ class AgentConfig:
     wake_flat_multiplier: float = 2.0
     min_wake_gap_flat_s: int = 60
     min_wake_gap_position_s: int = 15
+    min_check_flat_s: int = 120  # no position: scheduled checks no more often than this
     notes_in_context: int = 10
     feedback_in_context: int = 15
     radar_rows_in_context: int = 10
@@ -279,6 +280,13 @@ class AgentRuntime:
         )
         if not self._next_check_ms:
             self._next_check_ms = now_ms() + default_s * 1000
+        await self._remember_market_state()
+        if not self._had_position:
+            # Flat: scheduled checks are spaced out to save model usage; a sharp move
+            # still wakes the agent through the watchdog.
+            self._next_check_ms = max(
+                self._next_check_ms, now_ms() + self.config.min_check_flat_s * 1000
+            )
         if self._tick_note:
             self.journal.write(
                 "note", n=self.tick_no, focus=self.focus_symbol, text=self._tick_note
@@ -291,7 +299,6 @@ class AgentRuntime:
             self.session_cost_usd,
             (self._tick_note or "(no note)").replace("\n", " ")[:300],
         )
-        await self._remember_market_state()
 
     async def _remember_market_state(self) -> None:
         self._last_tick_end_ms = now_ms()

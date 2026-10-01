@@ -356,7 +356,9 @@ TOOLS: list[Tool] = [
         ToolSpec(
             "finish_tick",
             "End this check: when to look again and a short note to your future self "
-            "(what you see, what you expect, what would change your mind).",
+            "(what you see, what you expect, what would change your mind). Without an open "
+            "position the next check is never sooner than the configured flat minimum "
+            "(see the prompt); a sharp price move still wakes you earlier.",
             _schema(
                 {
                     "next_check_seconds": {

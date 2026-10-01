@@ -402,3 +402,27 @@ async def test_open_reports_stop_distance_in_atr_and_focus_warns_on_illiquid(tmp
     assert "illiquid" in results[0]["warning"]
     assert results[1]["stop_distance_pct"] == pytest.approx(0.2)
     assert results[1]["stop_distance_in_atr_5m"] == pytest.approx(0.2)
+
+
+async def test_flat_checks_are_spaced_out_but_positions_are_watched_closely(tmp_path):
+    from enduro.core.models import now_ms
+
+    llm = ScriptedLLM(
+        [
+            [turn(call("finish_tick", next_check_seconds=20, note="flat, wants 20 s"))],
+            [turn(call("finish_tick", next_check_seconds=20, note="in position, 20 s"))],
+        ]
+    )
+    rt, trading, *_ = runtime(tmp_path, llm, AgentConfig(min_check_flat_s=120))
+    await rt.tick("start")
+    assert (rt._next_check_ms - now_ms()) / 1000 == pytest.approx(120, abs=2)
+
+    await rt.set_focus("SOL/USDT:USDT", "x")
+    trading.positions = [{"symbol": "SOL/USDT:USDT", "side": "long"}]
+    await rt.tick("scheduled")
+    assert (rt._next_check_ms - now_ms()) / 1000 == pytest.approx(20, abs=2)
+
+
+def test_prompt_states_the_flat_minimum():
+    text = render_prompt(Path("prompts/trader.md"), RiskLimits(), 5.5, "demo", min_check_flat_s=150)
+    assert "не раньше чем через 150 секунд" in text
