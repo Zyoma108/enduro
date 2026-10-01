@@ -12,6 +12,7 @@ from enduro.execution.models import (
     OrderRequest,
     OrderResult,
     Position,
+    PositionSide,
 )
 
 
@@ -35,6 +36,20 @@ class ExecutionGateway(Protocol):
         ...
 
     async def place_order(self, request: OrderRequest) -> OrderResult: ...
+
+    async def set_protection(
+        self,
+        symbol: str,
+        side: PositionSide,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+    ) -> None:
+        """Set or move the position's stop loss / take profit on the exchange (0 removes)."""
+        ...
+
+    async def wait_for_fill(
+        self, order_id: str, symbol: str, timeout_s: float = 10.0
+    ) -> OrderResult: ...
 
     async def fetch_order(self, order_id: str, symbol: str) -> OrderResult: ...
 

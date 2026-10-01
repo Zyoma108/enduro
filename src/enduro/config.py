@@ -72,6 +72,24 @@ class RiskConfig(BaseModel):
     state_path: Path = Path("state/risk.json")
 
 
+class AgentSettings(BaseModel):
+    model: str = "claude-opus-5-5"
+    effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    max_tokens: int = Field(default=16_000, ge=1_000)
+    prompt_path: Path = Path("prompts/trader.md")
+    journal_dir: Path = Path("state/journal")
+    search_interval_s: int = Field(default=180, ge=15)
+    focus_interval_s: int = Field(default=60, ge=15)
+    max_llm_calls_per_tick: int = Field(default=8, ge=1)
+    wake_move_bps: float = Field(default=30.0, gt=0)
+
+
+class ApiKey(BaseModel):
+    """ENDURO_ANTHROPIC__API_KEY in .env (falls back to the SDK's own resolution)."""
+
+    api_key: SecretStr | None = None
+
+
 class ApiCredentials(BaseModel):
     """Set via env only: ENDURO_BYBIT__API_KEY / ENDURO_BYBIT__API_SECRET."""
 
@@ -99,6 +117,8 @@ class Settings(BaseSettings):
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     bybit: ApiCredentials = Field(default_factory=ApiCredentials)
+    agent: AgentSettings = Field(default_factory=AgentSettings)
+    anthropic: ApiKey = Field(default_factory=ApiKey)
 
     @classmethod
     def settings_customise_sources(

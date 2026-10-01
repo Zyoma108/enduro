@@ -213,3 +213,41 @@ class RiskManager:
             risk_pct=risk_usd / equity * 100,
             leverage=qty * entry / equity,
         )
+
+    def evaluate_protection(
+        self,
+        position: Position,
+        *,
+        stop_loss: float | None,
+        take_profit: float | None,
+        mark: float,
+        equity: float,
+    ) -> tuple[bool, str]:
+        """May the agent set this stop / take profit on an open position?
+
+        A stop can never be removed. Tightening it is always allowed; loosening it only
+        while the loss from entry to the new stop (fees included) stays within the
+        per-trade budget.
+        """
+        long = position.side == "long"
+        if stop_loss is not None:
+            if stop_loss <= 0:
+                return False, "removing the stop loss is not allowed"
+            if (long and stop_loss >= mark) or (not long and stop_loss <= mark):
+                side = "below" if long else "above"
+                return False, f"{position.side} stop {stop_loss} must be {side} the price ~{mark}"
+            entry = position.entry_price or mark
+            adverse = (entry - stop_loss) if long else (stop_loss - entry)
+            risk = position.size * (max(0.0, adverse) + self.taker_fee * (entry + stop_loss))
+            budget = equity * self.limits.risk_per_trade_pct / 100
+            current = position.stop_loss
+            tighter = current is not None and (stop_loss > current if long else stop_loss < current)
+            if not tighter and risk > budget * (1 + _LIMIT_EPS):
+                return False, (
+                    f"stop {stop_loss} would risk {risk:.2f} USDT from entry {entry} "
+                    f"> budget {budget:.2f} USDT"
+                )
+        if take_profit is not None and take_profit != 0:
+            if (long and take_profit <= mark) or (not long and take_profit >= mark):
+                return False, f"take profit {take_profit} is on the losing side of ~{mark}"
+        return True, ""

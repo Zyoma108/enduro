@@ -332,6 +332,10 @@ class FocusTracker:
                 while samples and samples[0][0] < cutoff:
                     samples.popleft()
 
+    def latest_book(self, exchange: str, symbol: str) -> OrderBook | None:
+        stream = self._streams.get((exchange, symbol))
+        return stream.book if stream else None
+
     def drop(self, symbol: str) -> None:
         """Forget a symbol that left the focus."""
         for key in [k for k in self._streams if k[1] == symbol]:

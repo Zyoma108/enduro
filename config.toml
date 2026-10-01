@@ -59,3 +59,18 @@ max_drawdown_pct = 10.0
 max_trades_per_hour = 6
 # Состояние риск-менеджера (пик, начало дня, kill-switch) — переживает перезапуски.
 state_path = "state/risk.json"
+
+[agent]
+# Модель и глубина размышлений (low | medium | high | xhigh | max).
+model = "claude-opus-5-5"
+effort = "medium"
+# Промпт с «духом» торговли. Числа лимитов подставляются из [risk] автоматически.
+prompt_path = "prompts/trader.md"
+journal_dir = "state/journal"
+# Интервалы по умолчанию, если агент сам не назначил следующую проверку.
+search_interval_s = 180
+focus_interval_s = 60
+# Не больше вызовов модели за один тик (защита от зацикливания).
+max_llm_calls_per_tick = 8
+# Разбудить агента раньше, если цена фокус-монеты сдвинулась на столько б.п.
+wake_move_bps = 30

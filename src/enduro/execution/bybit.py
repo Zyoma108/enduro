@@ -21,6 +21,7 @@ from enduro.execution.models import (
     OrderRequest,
     OrderResult,
     Position,
+    PositionSide,
 )
 
 log = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ _MARGIN_MODES = {
     "PORTFOLIO_MARGIN": "portfolio",
 }
 # "Not modified" answers when a setting already has the requested value.
-_ALREADY_SET = ("110025", "110043")  # position mode, leverage
+_ALREADY_SET = ("110025", "110043", "34040")  # position mode, leverage, trading stop
 
 
 class LiveTradingNotAllowed(RuntimeError):
@@ -222,6 +223,38 @@ class BybitGateway:
             order_params(request),
         )
         return order_from_ccxt({**raw, "symbol": raw.get("symbol") or request.symbol})
+
+    async def set_protection(
+        self,
+        symbol: str,
+        side: PositionSide,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+    ) -> None:
+        """Set (or move) the position-level stop loss / take profit. 0 removes one."""
+        await self._call("load markets", self._client.load_markets)
+        market = self._client.market(symbol)
+        request: dict[str, Any] = {
+            "category": "linear",
+            "symbol": market["id"],
+            "positionIdx": POSITION_IDX[side],
+            "tpslMode": "Full",
+        }
+        if stop_loss is not None:
+            request["stopLoss"] = (
+                "0" if stop_loss == 0 else self._client.price_to_precision(symbol, stop_loss)
+            )
+            request["slTriggerBy"] = "LastPrice"
+        if take_profit is not None:
+            request["takeProfit"] = (
+                "0" if take_profit == 0 else self._client.price_to_precision(symbol, take_profit)
+            )
+            request["tpTriggerBy"] = "LastPrice"
+        try:
+            await self._call("trading stop", self._client.privatePostV5PositionTradingStop, request)
+        except ccxt.ExchangeError as e:
+            if not _already_set(e):
+                raise
 
     async def fetch_order(self, order_id: str, symbol: str) -> OrderResult:
         raw = await self._call(

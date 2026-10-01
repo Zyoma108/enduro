@@ -7,16 +7,17 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import signal
 import sys
 from datetime import UTC, datetime
 
-from enduro.analytics.baseline import load_baselines
 from enduro.analytics.focus import WINDOWS_S, FocusSnapshot, FocusTracker
 from enduro.analytics.market_state import MarketState
-from enduro.analytics.radar import LOOKBACK_MINUTES, Radar, RadarRow
+from enduro.analytics.radar import RadarRow
+from enduro.analytics.radar_runner import RadarRunner
 from enduro.config import Settings
-from enduro.core.models import MINUTE_MS, Candle, OrderBook, now_ms
+from enduro.core.models import OrderBook, now_ms
 from enduro.data.bus import EventBus
 from enduro.data.ccxt_source import CcxtSource
 from enduro.data.collector import Collector
@@ -26,7 +27,7 @@ from enduro.execution.bybit import BybitGateway
 from enduro.execution.models import OrderAction, OrderRequest, OrderResult, PositionSide
 from enduro.risk.manager import RiskLimits, RiskManager, RiskStateStore
 from enduro.storage import store
-from enduro.storage.candles import last_candle_ts, load_recent_candles, write_candles
+from enduro.storage.candles import last_candle_ts, write_candles
 from enduro.storage.parquet_sink import ParquetSink
 
 log = logging.getLogger(__name__)
@@ -322,6 +323,118 @@ def _risk(settings: Settings, reset: bool) -> None:
     print(f"opens/hour  : {len(state.opens)} recorded")
 
 
+async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> None:
+    _cancel_on_shutdown_signals()
+    from enduro.agent.claude import ClaudeClient
+    from enduro.agent.prompt import render_prompt
+    from enduro.agent.runtime import AgentConfig, AgentRuntime
+    from enduro.journal.journal import Journal
+    from enduro.trading.service import TradingService
+
+    market, agent_cfg = settings.market, settings.agent
+    api_key = settings.anthropic.api_key.get_secret_value() if settings.anthropic.api_key else None
+    if not api_key and not os.environ.get("ANTHROPIC_API_KEY"):
+        sys.exit("no Anthropic API key: set ENDURO_ANTHROPIC__API_KEY in .env")
+
+    gateway = _gateway(settings)
+    risk = _risk_manager(settings)
+    journal = Journal(agent_cfg.journal_dir)
+    reference = CcxtSource(market.reference_exchange, market_type=market.market_type)
+    execution = CcxtSource(market.execution_exchange, market_type=market.market_type)
+    stream_sources = [
+        CcxtSource(ex, market_type=market.market_type, book_limit=FOCUS_BOOK_LIMITS.get(ex))
+        for ex in (market.reference_exchange, market.execution_exchange)
+    ]
+    llm = ClaudeClient(agent_cfg.model, agent_cfg.effort, agent_cfg.max_tokens, api_key)
+    try:
+        state = await gateway.account_state()
+        if state.margin_mode != "cross" or not state.hedge_mode:
+            sys.exit("account is not in cross margin + hedge mode; run `enduro account --setup`")
+        symbols = [e.symbol for e in await _build_universe(settings, reference, execution)]
+        radar = RadarRunner(
+            reference,
+            symbols,
+            settings.storage.root,
+            settings.scanner.history_days,
+            settings.scanner.taker_fee_bps,
+        )
+        log.info("preparing radar for %d symbols", len(symbols))
+        await radar.prepare()
+
+        bus = EventBus()
+        events = bus.subscribe()
+        tracker = FocusTracker(market.reference_exchange, market.execution_exchange)
+        collector = Collector(stream_sources, [], bus, book_depth=FOCUS_BOOK_DEPTH)
+
+        async def quote(symbol: str) -> tuple[float, float]:
+            """Best bid/ask on the execution exchange: live book if fresh, else REST."""
+            book = tracker.latest_book(market.execution_exchange, symbol)
+            if book is None or now_ms() - book.recv_ts > 3_000 or book.mid is None:
+                book = await execution.fetch_top_of_book(symbol)
+            return book.best_bid, book.best_ask
+
+        trading = TradingService(gateway, risk, journal, quote, dry_run=dry_run)
+        prompt = render_prompt(
+            agent_cfg.prompt_path,
+            risk.limits,
+            settings.scanner.taker_fee_bps,
+            settings.execution.environment,
+        )
+        runtime = AgentRuntime(
+            llm=llm,
+            system_prompt=prompt,
+            trading=trading,
+            radar=radar,
+            focus_collector=collector,
+            focus_tracker=tracker,
+            reference_source=reference,
+            journal=journal,
+            config=AgentConfig(
+                search_interval_s=agent_cfg.search_interval_s,
+                focus_interval_s=agent_cfg.focus_interval_s,
+                max_llm_calls_per_tick=agent_cfg.max_llm_calls_per_tick,
+                wake_move_bps=agent_cfg.wake_move_bps,
+            ),
+            universe=symbols,
+            reference=market.reference_exchange,
+            execution=market.execution_exchange,
+            focus_events=events,
+        )
+        open_positions = await gateway.positions()
+        if open_positions:
+            held = open_positions[0].symbol
+            runtime.universe.add(held)
+            await runtime.set_focus(held, "position already open at start: manage it")
+            log.warning("open position on %s at start: focusing on it", held)
+        journal.write(
+            "start",
+            model=agent_cfg.model,
+            effort=agent_cfg.effort,
+            dry_run=dry_run,
+            environment=settings.execution.environment,
+            universe=len(symbols),
+        )
+        log.info(
+            "agent started: %s (%s), %s%s",
+            agent_cfg.model,
+            agent_cfg.effort,
+            settings.execution.environment,
+            " DRY RUN" if dry_run else "",
+        )
+        await runtime.run(max_ticks)
+        log.info(
+            "agent stopped after %d ticks, cost $%.3f", runtime.tick_no, runtime.session_cost_usd
+        )
+    finally:
+        await asyncio.gather(
+            gateway.close(),
+            reference.close(),
+            execution.close(),
+            llm.close(),
+            return_exceptions=True,
+        )
+
+
 async def _universe(settings: Settings) -> None:
     market = settings.market
     reference = CcxtSource(market.reference_exchange, market_type=market.market_type)
@@ -368,71 +481,37 @@ async def _backfill(settings: Settings, days: int) -> None:
         await asyncio.gather(*(src.close() for src in sources))
 
 
-RADAR_PERSIST_EVERY_MS = 60 * MINUTE_MS
-
-
 async def _scan(settings: Settings, top: int, as_json: bool, once: bool) -> None:
-    market, root = settings.market, settings.storage.root
+    market = settings.market
     reference = CcxtSource(market.reference_exchange, market_type=market.market_type)
     execution = CcxtSource(market.execution_exchange, market_type=market.market_type)
-    pending: list[Candle] = []
+    runner: RadarRunner | None = None
     try:
         symbols = [e.symbol for e in await _build_universe(settings, reference, execution)]
-        now = now_ms()
-
-        # Bring stored history up to date first, so candles the radar persists later
-        # continue it without gaps.
-        last = await asyncio.to_thread(last_candle_ts, root, reference.exchange)
-        history_start = now - settings.scanner.history_days * 86_400_000
-
-        async def persist(symbol: str, candles: list[Candle]) -> None:
-            await asyncio.to_thread(write_candles, root, candles)
-
-        await backfill(reference, symbols, last, history_start, now, persist)
-
-        baselines = await asyncio.to_thread(load_baselines, root, reference.exchange, history_start)
-        missing = [s for s in symbols if s not in baselines]
-        if missing:
-            log.warning("no baseline (history) for %d symbols: %s", len(missing), missing)
-        radar = Radar(baselines, round_trip_fee=2 * settings.scanner.taker_fee_bps / 1e4)
-        since = now - LOOKBACK_MINUTES * MINUTE_MS
-        radar.add(
-            await asyncio.to_thread(load_recent_candles, root, reference.exchange, symbols, since)
+        runner = RadarRunner(
+            reference,
+            symbols,
+            settings.storage.root,
+            settings.scanner.history_days,
+            settings.scanner.taker_fee_bps,
         )
+        await runner.prepare()
 
-        def collect(symbol: str, candles: list[Candle]) -> None:
-            radar.add(candles)
-            pending.extend(candles)
-
-        last_persist = now
-        while True:
-            now = now_ms()
-            await backfill(
-                reference,
-                symbols,
-                radar.last_ts(),
-                now - LOOKBACK_MINUTES * MINUTE_MS,
-                now,
-                collect,
-            )
-            rows = radar.scan(symbols)[:top]
+        def show(rows: list[RadarRow]) -> None:
             if as_json:
-                print(json.dumps([r.to_summary() for r in rows], ensure_ascii=False), flush=True)
+                print(
+                    json.dumps([r.to_summary() for r in rows[:top]], ensure_ascii=False), flush=True
+                )
             else:
-                print(_render_radar(rows, reference.exchange, len(symbols)), flush=True)
-            if once:
-                break
-            if now - last_persist >= RADAR_PERSIST_EVERY_MS and pending:
-                batch = pending.copy()
-                pending.clear()
-                await asyncio.to_thread(write_candles, root, batch)
-                last_persist = now
-            # Wake a few seconds after the next minute closes, when exchanges have the candle.
-            next_minute = (now_ms() // MINUTE_MS + 1) * MINUTE_MS
-            await asyncio.sleep((next_minute - now_ms()) / 1000 + 3)
+                print(_render_radar(rows[:top], reference.exchange, len(symbols)), flush=True)
+
+        if once:
+            show(await runner.refresh())
+        else:
+            await runner.run_forever(show)
     finally:
-        if pending:
-            write_candles(root, pending)
+        if runner is not None:
+            runner.flush()
         await asyncio.gather(reference.close(), execution.close())
 
 
@@ -533,6 +612,12 @@ def main() -> None:
     focus.add_argument("--interval", type=float, default=10.0, help="report interval, seconds")
     focus.add_argument("--json", action="store_true", help="print agent-facing JSON")
 
+    agent = commands.add_parser("agent", help="run the LLM trading agent")
+    agent.add_argument(
+        "--dry-run", action="store_true", help="decide and journal, but never send orders"
+    )
+    agent.add_argument("--ticks", type=int, help="stop after N ticks")
+
     sql = commands.add_parser("sql", help="query recorded data (views: trades, books)")
     sql.add_argument("query", help='e.g. "select exchange, count(*) from trades group by 1"')
 
@@ -566,6 +651,9 @@ def main() -> None:
     elif args.command == "focus":
         with contextlib.suppress(asyncio.CancelledError):
             asyncio.run(_focus(settings, args.symbols, args.interval, args.json))
+    elif args.command == "agent":
+        with contextlib.suppress(asyncio.CancelledError):
+            asyncio.run(_agent(settings, args.dry_run, args.ticks))
     elif args.command == "sql":
         try:
             store.connect(settings.storage.root).sql(args.query).show(max_rows=100)
