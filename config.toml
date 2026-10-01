@@ -61,6 +61,13 @@ max_trades_per_hour = 6
 state_path = "state/risk.json"
 
 [agent]
+# Как запускается модель:
+#   "claude-code" — через Claude Code CLI (`claude -p`) под вашей учётной записью/подпиской;
+#   "api"         — через Anthropic API (нужен ENDURO_ANTHROPIC__API_KEY в .env).
+backend = "claude-code"
+claude_bin = "claude"
+# Сколько ждать один тик в режиме claude-code, секунд.
+claude_timeout_s = 300
 # Модель и глубина размышлений (low | medium | high | xhigh | max).
 model = "claude-opus-5-5"
 effort = "medium"
@@ -72,5 +79,7 @@ search_interval_s = 180
 focus_interval_s = 60
 # Не больше вызовов модели за один тик (защита от зацикливания).
 max_llm_calls_per_tick = 8
+# Не больше вызовов инструментов за тик (для обоих бэкендов).
+max_tool_calls_per_tick = 16
 # Разбудить агента раньше, если цена фокус-монеты сдвинулась на столько б.п.
 wake_move_bps = 30

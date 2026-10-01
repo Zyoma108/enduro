@@ -8,6 +8,7 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import signal
 import sys
 from datetime import UTC, datetime
@@ -326,15 +327,28 @@ def _risk(settings: Settings, reset: bool) -> None:
 async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> None:
     _cancel_on_shutdown_signals()
     from enduro.agent.claude import ClaudeClient
+    from enduro.agent.claude_code import ClaudeCodeBackend
     from enduro.agent.prompt import render_prompt
     from enduro.agent.runtime import AgentConfig, AgentRuntime
     from enduro.journal.journal import Journal
     from enduro.trading.service import TradingService
 
     market, agent_cfg = settings.market, settings.agent
-    api_key = settings.anthropic.api_key.get_secret_value() if settings.anthropic.api_key else None
-    if not api_key and not os.environ.get("ANTHROPIC_API_KEY"):
-        sys.exit("no Anthropic API key: set ENDURO_ANTHROPIC__API_KEY in .env")
+    if agent_cfg.backend == "api":
+        key = settings.anthropic.api_key
+        api_key = key.get_secret_value() if key else None
+        if not api_key and not os.environ.get("ANTHROPIC_API_KEY"):
+            sys.exit("no Anthropic API key: set ENDURO_ANTHROPIC__API_KEY in .env")
+        llm = ClaudeClient(agent_cfg.model, agent_cfg.effort, agent_cfg.max_tokens, api_key)
+    else:
+        if shutil.which(agent_cfg.claude_bin) is None:
+            sys.exit(f"Claude Code CLI not found: {agent_cfg.claude_bin!r}")
+        llm = ClaudeCodeBackend(
+            agent_cfg.model,
+            agent_cfg.effort,
+            timeout_s=agent_cfg.claude_timeout_s,
+            claude_bin=agent_cfg.claude_bin,
+        )
 
     gateway = _gateway(settings)
     risk = _risk_manager(settings)
@@ -345,7 +359,6 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
         CcxtSource(ex, market_type=market.market_type, book_limit=FOCUS_BOOK_LIMITS.get(ex))
         for ex in (market.reference_exchange, market.execution_exchange)
     ]
-    llm = ClaudeClient(agent_cfg.model, agent_cfg.effort, agent_cfg.max_tokens, api_key)
     try:
         state = await gateway.account_state()
         if state.margin_mode != "cross" or not state.hedge_mode:
@@ -393,6 +406,7 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
                 search_interval_s=agent_cfg.search_interval_s,
                 focus_interval_s=agent_cfg.focus_interval_s,
                 max_llm_calls_per_tick=agent_cfg.max_llm_calls_per_tick,
+                max_tool_calls_per_tick=agent_cfg.max_tool_calls_per_tick,
                 wake_move_bps=agent_cfg.wake_move_bps,
             ),
             universe=symbols,
@@ -408,6 +422,7 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
             log.warning("open position on %s at start: focusing on it", held)
         journal.write(
             "start",
+            backend=agent_cfg.backend,
             model=agent_cfg.model,
             effort=agent_cfg.effort,
             dry_run=dry_run,

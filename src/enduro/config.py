@@ -73,6 +73,11 @@ class RiskConfig(BaseModel):
 
 
 class AgentSettings(BaseModel):
+    # "claude-code": the model runs through the Claude Code CLI (`claude -p`) on the
+    # account it is logged into; "api": Anthropic API (needs ENDURO_ANTHROPIC__API_KEY).
+    backend: Literal["claude-code", "api"] = "claude-code"
+    claude_bin: str = "claude"
+    claude_timeout_s: float = Field(default=300.0, gt=0)
     model: str = "claude-opus-5-5"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
     max_tokens: int = Field(default=16_000, ge=1_000)
@@ -81,6 +86,7 @@ class AgentSettings(BaseModel):
     search_interval_s: int = Field(default=180, ge=15)
     focus_interval_s: int = Field(default=60, ge=15)
     max_llm_calls_per_tick: int = Field(default=8, ge=1)
+    max_tool_calls_per_tick: int = Field(default=16, ge=2)
     wake_move_bps: float = Field(default=30.0, gt=0)
 
 

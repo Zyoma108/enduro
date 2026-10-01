@@ -9,6 +9,7 @@ implementing `LLMSession` / `LLMClient`.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -70,3 +71,72 @@ class LLMClient(Protocol):
     name: str  # e.g. "claude-opus-5-5"
 
     def session(self, system: str, tools: list[ToolSpec]) -> LLMSession: ...
+
+
+ToolCaller = Callable[[str, dict[str, Any]], Awaitable[ToolResult]]  # name, args -> result
+UsageSink = Callable[[LLMTurn], None]
+
+
+class EpisodeBackend(Protocol):
+    """Runs one agent episode end to end: the model may call tools any number of times.
+
+    `call_tool` executes a tool in the agent process; `record` journals each model turn
+    (or one aggregate turn when the backend cannot see individual turns); `is_done`
+    tells whether the agent already called finish_tick.
+    """
+
+    name: str
+
+    async def run_episode(
+        self,
+        system: str,
+        situation: str,
+        tools: list[ToolSpec],
+        call_tool: ToolCaller,
+        record: UsageSink,
+        is_done: Callable[[], bool],
+    ) -> str:
+        """Returns the model's final text."""
+        ...
+
+    async def close(self) -> None: ...
+
+
+class ApiLoopBackend:
+    """Drives an LLMClient turn by turn: we execute tools between model calls."""
+
+    def __init__(self, llm: LLMClient, max_calls: int) -> None:
+        self.llm = llm
+        self.name = llm.name
+        self.max_calls = max_calls
+
+    async def run_episode(
+        self,
+        system: str,
+        situation: str,
+        tools: list[ToolSpec],
+        call_tool: ToolCaller,
+        record: UsageSink,
+        is_done: Callable[[], bool],
+    ) -> str:
+        session = self.llm.session(system, tools)
+        turn = await session.send(situation)
+        for call_no in range(self.max_calls):
+            record(turn)
+            if not turn.tool_calls:
+                return turn.text
+            results = []
+            for c in turn.tool_calls:
+                result = await call_tool(c.name, c.input)
+                results.append(ToolResult(c.id, result.content, result.is_error))
+            if is_done() or call_no == self.max_calls - 1:
+                if not is_done():
+                    raise LLMError(f"episode exceeded {self.max_calls} model calls")
+                return turn.text
+            turn = await session.send_tool_results(results)
+        return turn.text
+
+    async def close(self) -> None:
+        close = getattr(self.llm, "close", None)
+        if close is not None:
+            await close()

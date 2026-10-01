@@ -35,6 +35,11 @@ python3 -m venv .venv
 .venv/bin/enduro account --setup   # включить кросс-маржу и режим хеджирования
 .venv/bin/enduro test-trade ETH/USDT:USDT --side long --with-stop 1   # только demo
 .venv/bin/enduro risk              # лимиты и состояние риск-менеджера (--reset — снять kill-switch)
+
+# Агент. По умолчанию модель запускается через Claude Code CLI (`claude -p`) под вашей
+# учётной записью; промпт — prompts/trader.md, журнал — state/journal/*.jsonl
+.venv/bin/enduro agent --dry-run --ticks 3   # решения без отправки ордеров
+.venv/bin/enduro agent                       # торговля на demo
 ```
 
 Настройки — в `config.toml`, секреты — только через переменные окружения / `.env`

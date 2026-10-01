@@ -14,12 +14,16 @@ making structural changes — it records the agreed principles and open question
 - Radar / focus: `.venv/bin/enduro universe`, `backfill`, `scan --once`, `focus SYMBOL --json`
 - Execution (demo): `.venv/bin/enduro account` (read-only); `enduro test-trade` places real
   demo orders — ask the user before running it.
+- Agent: `.venv/bin/enduro agent --dry-run --ticks 2` (no orders, but each tick runs
+  `claude -p` on the user's subscription — keep test runs short); without `--dry-run` it trades.
 
 ## Layout
 
 `src/enduro/` — `core` (models), `data` (collection), `storage` (Parquet + DuckDB),
 `analytics` (metrics, baselines, radar, focus), `execution` (gateway protocol + Bybit),
-`risk` (limits, sizing, kill switch), then planned `agent`, `journal`, `modes`.
+`risk` (limits, sizing, kill switch), `trading` (intent → exchange), `journal`, `agent`
+(runtime, tools, prompt rendering, backends: Claude Code CLI via local MCP, or API).
+The trader's prompt is `prompts/trader.md` — the user owns its wording.
 
 ## Rules
 

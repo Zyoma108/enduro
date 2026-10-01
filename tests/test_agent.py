@@ -86,7 +86,9 @@ class FakeTrading:
         return {"opened": True, "qty": 1.0}
 
 
-def runtime(tmp_path, llm) -> tuple[AgentRuntime, FakeTrading, FakeCollector, Journal]:
+def runtime(
+    tmp_path, llm, config: AgentConfig | None = None
+) -> tuple[AgentRuntime, FakeTrading, FakeCollector, Journal]:
     trading, collector = FakeTrading(), FakeCollector()
     journal = Journal(tmp_path / "journal")
     rt = AgentRuntime(
@@ -98,7 +100,7 @@ def runtime(tmp_path, llm) -> tuple[AgentRuntime, FakeTrading, FakeCollector, Jo
         focus_tracker=FocusTracker("binance", "bybit"),
         reference_source=None,
         journal=journal,
-        config=AgentConfig(),
+        config=config or AgentConfig(),
         universe=["SOL/USDT:USDT", "ETH/USDT:USDT"],
         reference="binance",
         execution="bybit",
@@ -186,8 +188,7 @@ async def test_unknown_symbol_and_trading_without_focus_are_errors(tmp_path):
 
 async def test_tick_stops_after_max_llm_calls(tmp_path):
     llm = ScriptedLLM([[turn(call("get_account")) for _ in range(10)]])
-    rt, *_, journal = runtime(tmp_path, llm)
-    rt.config = AgentConfig(max_llm_calls_per_tick=3)
+    rt, *_, journal = runtime(tmp_path, llm, AgentConfig(max_llm_calls_per_tick=3))
     await rt.tick("start")
     assert sum(1 for r in journal.read() if r["kind"] == "llm") == 3
     assert any(r["kind"] == "error" for r in journal.read())

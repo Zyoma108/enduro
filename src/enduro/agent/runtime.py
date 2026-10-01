@@ -20,7 +20,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from enduro.agent.llm import LLMClient, LLMError, LLMTurn, ToolResult
+from enduro.agent.llm import (
+    ApiLoopBackend,
+    EpisodeBackend,
+    LLMClient,
+    LLMError,
+    LLMTurn,
+    ToolResult,
+)
 from enduro.agent.tools import TOOLS, TOOLS_BY_NAME, ToolInputError, to_json
 from enduro.analytics.focus import FocusTracker
 from enduro.analytics.radar_runner import RadarRunner
@@ -42,6 +49,7 @@ class AgentConfig:
     search_interval_s: int = 180  # default next check when the agent does not schedule one
     focus_interval_s: int = 60
     max_llm_calls_per_tick: int = 8
+    max_tool_calls_per_tick: int = 16
     wake_move_bps: float = 30.0  # wake early when the focus price moves this much
     notes_in_context: int = 10
     radar_rows_in_context: int = 10
@@ -50,7 +58,7 @@ class AgentConfig:
 class AgentRuntime:
     def __init__(
         self,
-        llm: LLMClient,
+        llm: LLMClient | EpisodeBackend,
         system_prompt: str,
         trading: TradingService,
         radar: RadarRunner,
@@ -64,7 +72,13 @@ class AgentRuntime:
         execution: str,
         focus_events: asyncio.Queue | None = None,
     ) -> None:
-        self.llm = llm
+        # A plain LLM client gets our own tool loop; a backend (e.g. Claude Code) runs its own.
+        self.backend: EpisodeBackend = (
+            llm
+            if hasattr(llm, "run_episode")
+            else ApiLoopBackend(llm, config.max_llm_calls_per_tick)
+        )
+        self._tool_calls_this_tick = 0
         self.system_prompt = system_prompt
         self.trading = trading
         self.radar = radar
@@ -268,27 +282,35 @@ class AgentRuntime:
         return "\n".join(parts)
 
     async def _episode(self, situation: str) -> None:
-        session = self.llm.session(self.system_prompt, [t.spec for t in TOOLS])
-        turn = await session.send(situation)
-        for call_no in range(self.config.max_llm_calls_per_tick):
-            self._account_llm(turn)
-            if not turn.tool_calls:
-                if self._tick_note is None and turn.text:
-                    self._tick_note = turn.text.strip()[:2000]
-                return
-            results = [await self._run_tool(c.name, c.id, c.input) for c in turn.tool_calls]
-            if self._tick_note is not None:  # finish_tick was called: the tick is over
-                return
-            if call_no == self.config.max_llm_calls_per_tick - 1:
-                self.journal.write("error", what="tick exceeded max LLM calls")
-                return
-            turn = await session.send_tool_results(results)
+        self._tool_calls_this_tick = 0
+        text = await self.backend.run_episode(
+            self.system_prompt,
+            situation,
+            [t.spec for t in TOOLS],
+            self.call_tool,
+            self._account_llm,
+            lambda: self._tick_note is not None,
+        )
+        if self._tick_note is None and text:  # ended without finish_tick: keep its words
+            self._tick_note = text.strip()[:2000]
+
+    async def call_tool(self, name: str, args: dict[str, Any]) -> ToolResult:
+        """Execute one tool call for whichever backend runs the episode."""
+        return await self._run_tool(name, "", args)
 
     async def _run_tool(self, name: str, call_id: str, args: dict[str, Any]) -> ToolResult:
         tool = TOOLS_BY_NAME.get(name)
+        self._tool_calls_this_tick += 1
         try:
             if tool is None:
                 raise ToolInputError(f"unknown tool {name!r}")
+            if (
+                self._tool_calls_this_tick > self.config.max_tool_calls_per_tick
+                and name != "finish_tick"
+            ):
+                raise ToolInputError("tool budget for this check is used up: call finish_tick")
+            if self._tick_note is not None and name != "finish_tick":
+                raise ToolInputError("this check is finished (finish_tick was called); stop here")
             result = await tool.handler(self, args)
             self.journal.write("tool", n=self.tick_no, name=name, input=args, result=result)
             return ToolResult(call_id, to_json(result))
