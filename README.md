@@ -33,7 +33,8 @@ python3 -m venv .venv
 # Исполнение (по умолчанию Bybit Demo Trading; ключи — в .env)
 .venv/bin/enduro account           # режим маржи, хедж, баланс, позиции, ордера
 .venv/bin/enduro account --setup   # включить кросс-маржу и режим хеджирования
-.venv/bin/enduro test-trade ETH/USDT:USDT --side long   # только demo
+.venv/bin/enduro test-trade ETH/USDT:USDT --side long --with-stop 1   # только demo
+.venv/bin/enduro risk              # лимиты и состояние риск-менеджера (--reset — снять kill-switch)
 ```
 
 Настройки — в `config.toml`, секреты — только через переменные окружения / `.env`

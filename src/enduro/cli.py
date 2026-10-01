@@ -24,6 +24,7 @@ from enduro.data.history import backfill
 from enduro.data.universe import UniverseEntry, build_universe
 from enduro.execution.bybit import BybitGateway
 from enduro.execution.models import OrderAction, OrderRequest, OrderResult, PositionSide
+from enduro.risk.manager import RiskLimits, RiskManager, RiskStateStore
 from enduro.storage import store
 from enduro.storage.candles import last_candle_ts, load_recent_candles, write_candles
 from enduro.storage.parquet_sink import ParquetSink
@@ -125,7 +126,9 @@ async def _account(settings: Settings, setup: bool) -> None:
         print("\naccount is not in cross margin + hedge mode; run `enduro account --setup`")
 
 
-async def _test_trade(settings: Settings, symbol: str, side: PositionSide) -> None:
+async def _test_trade(
+    settings: Settings, symbol: str, side: PositionSide, stop_pct: float | None
+) -> None:
     """Open the minimum size at market on demo, then close it; report fills vs the book."""
     if settings.execution.environment != "demo":
         sys.exit("test-trade only runs against the demo environment")
@@ -147,8 +150,21 @@ async def _test_trade(settings: Settings, symbol: str, side: PositionSide) -> No
             f"min notional {rules.min_notional:g} USDT -> order qty {qty:g}"
         )
 
+        stop = None
+        if stop_pct is not None:
+            ref = book.best_ask if side == "long" else book.best_bid
+            raw_stop = ref * (1 - stop_pct / 100 if side == "long" else 1 + stop_pct / 100)
+            stop = round(round(raw_stop / rules.price_tick) * rules.price_tick, 10)
+
         async def execute(action: OrderAction, book_before: OrderBook) -> OrderResult:
-            request = OrderRequest(symbol, side, action, qty, client_order_id=f"{tag}-{action[0]}")
+            request = OrderRequest(
+                symbol,
+                side,
+                action,
+                qty,
+                client_order_id=f"{tag}-{action[0]}",
+                stop_loss=stop if action == "open" else None,
+            )
             placed = await gateway.place_order(request)
             order = await gateway.wait_for_fill(placed.id, symbol)
             touch = book_before.best_ask if request.side == "buy" else book_before.best_bid
@@ -166,7 +182,10 @@ async def _test_trade(settings: Settings, symbol: str, side: PositionSide) -> No
         started = True  # from here on, a position on this side is ours to clean up
         opened = await execute("open", book)
         for p in await gateway.positions([symbol]):
-            print(f"position: {p.side} {p.size:g} entry {p.entry_price} lev {p.leverage}")
+            print(
+                f"position: {p.side} {p.size:g} entry {p.entry_price} lev {p.leverage} "
+                f"stop loss on exchange: {p.stop_loss} (requested {stop})"
+            )
         closed = await execute("close", await market_data.fetch_top_of_book(symbol))
         left = [p for p in await gateway.positions([symbol]) if p.side == side]
         print(f"position after close: {left[0].size:g}" if left else "position after close: flat")
@@ -275,6 +294,32 @@ def _render_focus(snap: FocusSnapshot) -> str:
         )
     )
     return "\n".join(lines)
+
+
+def _risk_manager(settings: Settings) -> RiskManager:
+    r = settings.risk
+    limits = RiskLimits(
+        risk_per_trade_pct=r.risk_per_trade_pct,
+        max_leverage=r.max_leverage,
+        max_open_positions=r.max_open_positions,
+        daily_loss_limit_pct=r.daily_loss_limit_pct,
+        max_drawdown_pct=r.max_drawdown_pct,
+        max_trades_per_hour=r.max_trades_per_hour,
+    )
+    return RiskManager(limits, settings.scanner.taker_fee_bps / 1e4, RiskStateStore(r.state_path))
+
+
+def _risk(settings: Settings, reset: bool) -> None:
+    rm = _risk_manager(settings)
+    if reset:
+        rm.reset_halt()
+        print("kill switch cleared; peak equity will restart from current equity")
+    state, limits = rm.state, rm.limits
+    print(f"limits      : {limits}")
+    print(f"kill switch : {state.halted or 'off'}")
+    print(f"peak equity : {state.peak_equity:,.2f} USDT")
+    print(f"day {state.day or '—'}: start equity {state.day_start_equity:,.2f} USDT")
+    print(f"opens/hour  : {len(state.opens)} recorded")
 
 
 async def _universe(settings: Settings) -> None:
@@ -463,6 +508,12 @@ def main() -> None:
     )
     test_trade.add_argument("symbol", help="e.g. BTC/USDT:USDT")
     test_trade.add_argument("--side", choices=["long", "short"], default="long")
+    test_trade.add_argument(
+        "--with-stop", type=float, metavar="PCT", help="attach a stop loss PCT%% away"
+    )
+
+    risk = commands.add_parser("risk", help="show risk limits and state")
+    risk.add_argument("--reset", action="store_true", help="manually clear the kill switch")
 
     account = commands.add_parser("account", help="show execution account state")
     account.add_argument(
@@ -502,7 +553,9 @@ def main() -> None:
     elif args.command == "account":
         asyncio.run(_account(settings, args.setup))
     elif args.command == "test-trade":
-        asyncio.run(_test_trade(settings, args.symbol, args.side))
+        asyncio.run(_test_trade(settings, args.symbol, args.side, args.with_stop))
+    elif args.command == "risk":
+        _risk(settings, args.reset)
     elif args.command == "universe":
         asyncio.run(_universe(settings))
     elif args.command == "backfill":

@@ -48,6 +48,13 @@ def order_params(request: OrderRequest) -> dict[str, Any]:
         params["reduceOnly"] = True
     if request.client_order_id:
         params["clientOrderId"] = request.client_order_id
+    # Position-level (tpslMode Full) market stop / take profit, triggered by last price.
+    if request.stop_loss is not None:
+        params["stopLoss"] = {"triggerPrice": request.stop_loss}
+        params["slTriggerBy"] = "LastPrice"
+    if request.take_profit is not None:
+        params["takeProfit"] = {"triggerPrice": request.take_profit}
+        params["tpTriggerBy"] = "LastPrice"
     return params
 
 
@@ -85,6 +92,8 @@ def position_from_ccxt(raw: dict[str, Any]) -> Position | None:
         unrealized_pnl=opt("unrealizedPnl"),
         leverage=opt("leverage"),
         liquidation_price=opt("liquidationPrice"),
+        stop_loss=opt("stopLossPrice"),
+        take_profit=opt("takeProfitPrice"),
     )
 
 

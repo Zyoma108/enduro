@@ -45,12 +45,17 @@ class OrderRequest:
     type: OrderType = "market"
     price: float | None = None  # required for limit orders
     client_order_id: str | None = None
+    # Attached to the position on the exchange the moment the order fills (opens only).
+    stop_loss: float | None = None
+    take_profit: float | None = None
 
     def __post_init__(self) -> None:
         if self.qty <= 0:
             raise ValueError("qty must be positive")
         if self.type == "limit" and self.price is None:
             raise ValueError("limit order requires a price")
+        if self.action == "close" and (self.stop_loss or self.take_profit):
+            raise ValueError("stop loss / take profit can only be attached to an open")
 
     @property
     def side(self) -> Literal["buy", "sell"]:
@@ -83,6 +88,8 @@ class Position:
     unrealized_pnl: float | None
     leverage: float | None
     liquidation_price: float | None
+    stop_loss: float | None = None
+    take_profit: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

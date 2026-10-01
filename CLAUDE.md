@@ -18,14 +18,16 @@ making structural changes — it records the agreed principles and open question
 ## Layout
 
 `src/enduro/` — `core` (models), `data` (collection), `storage` (Parquet + DuckDB),
-`analytics` (metrics, baselines, radar), `execution` (gateway protocol + Bybit), then
-planned `agent`, `risk`, `journal`, `modes`.
+`analytics` (metrics, baselines, radar, focus), `execution` (gateway protocol + Bybit),
+`risk` (limits, sizing, kill switch), then planned `agent`, `journal`, `modes`.
 
 ## Rules
 
 - Upper layers depend on protocols (`MarketDataSource`, future `ExecutionGateway`), never on
   ccxt directly. ccxt usage stays inside `data/ccxt_source.py` and `execution/bybit.py`.
 - The risk layer is deterministic code with veto power; never move risk limits into prompts.
+  Risk limit values are the user's decision (`[risk]` in config.toml) — don't change them
+  without asking. Runtime state lives in `state/` (gitignored).
 - Every agent decision must be journaled with its context and reasoning.
 - Hot-path market models are slotted dataclasses; pydantic is for config and boundaries.
 - Timestamps are epoch milliseconds; keep both `ts` (exchange) and `recv_ts` (local).

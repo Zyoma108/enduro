@@ -29,6 +29,16 @@ def test_hedge_mode_order_mapping(position_side, action, side, idx, reduce_only)
     assert params["clientOrderId"] == "c1"
 
 
+def test_stop_loss_and_take_profit_are_attached_to_opens():
+    request = OrderRequest("X", "long", "open", 1, stop_loss=95.0, take_profit=110.0)
+    params = order_params(request)
+    assert params["stopLoss"] == {"triggerPrice": 95.0}
+    assert params["takeProfit"] == {"triggerPrice": 110.0}
+    assert params["slTriggerBy"] == params["tpTriggerBy"] == "LastPrice"
+    with pytest.raises(ValueError):
+        OrderRequest("X", "long", "close", 1, stop_loss=95.0)
+
+
 def test_order_request_validation():
     with pytest.raises(ValueError):
         OrderRequest("X", "long", "open", 0)

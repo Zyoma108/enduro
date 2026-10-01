@@ -17,3 +17,6 @@ config.local.toml
 
 # Collected market data
 /data/
+
+# Runtime state (risk manager, journal)
+/state/

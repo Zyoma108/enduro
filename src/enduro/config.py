@@ -59,6 +59,19 @@ class ExecutionConfig(BaseModel):
     allow_live: bool = False
 
 
+class RiskConfig(BaseModel):
+    """Hard limits enforced in code; the agent cannot override them."""
+
+    risk_per_trade_pct: float = Field(default=1.0, gt=0, le=5)
+    max_leverage: float = Field(default=5.0, gt=0, le=20)
+    max_open_positions: int = Field(default=1, ge=1)
+    daily_loss_limit_pct: float = Field(default=5.0, gt=0)
+    max_drawdown_pct: float = Field(default=10.0, gt=0)
+    max_trades_per_hour: int = Field(default=6, ge=1)
+    # Peak equity, start-of-day equity, kill switch — must survive restarts.
+    state_path: Path = Path("state/risk.json")
+
+
 class ApiCredentials(BaseModel):
     """Set via env only: ENDURO_BYBIT__API_KEY / ENDURO_BYBIT__API_SECRET."""
 
@@ -84,6 +97,7 @@ class Settings(BaseSettings):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    risk: RiskConfig = Field(default_factory=RiskConfig)
     bybit: ApiCredentials = Field(default_factory=ApiCredentials)
 
     @classmethod
