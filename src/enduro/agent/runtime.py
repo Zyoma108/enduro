@@ -30,6 +30,7 @@ from enduro.agent.llm import (
 )
 from enduro.agent.tools import TOOLS, TOOLS_BY_NAME, ToolInputError, to_json
 from enduro.analytics.focus import FocusTracker
+from enduro.analytics.radar import RadarRow
 from enduro.analytics.radar_runner import RadarRunner
 from enduro.core.models import MINUTE_MS, Candle, now_ms
 from enduro.data.base import MarketDataSource
@@ -38,6 +39,14 @@ from enduro.journal.journal import Journal
 from enduro.trading.service import TradingService
 
 log = logging.getLogger(__name__)
+
+
+def wake_threshold_bps(atr_5m: float | None, in_position: bool, config: AgentConfig) -> float:
+    """How far the price must move since the last check to wake the agent early."""
+    threshold = config.wake_move_bps
+    if atr_5m and atr_5m > 0:
+        threshold = max(threshold, config.wake_move_atr * atr_5m * 1e4)
+    return threshold if in_position else threshold * config.wake_flat_multiplier
 
 
 class _Done(Exception):
@@ -50,7 +59,13 @@ class AgentConfig:
     focus_interval_s: int = 60
     max_llm_calls_per_tick: int = 8
     max_tool_calls_per_tick: int = 16
-    wake_move_bps: float = 30.0  # wake early when the focus price moves this much
+    # Early wake-up on a price move: half a 5m ATR of the coin (never below the floor);
+    # without a position the bar is doubled and wake-ups are spaced further apart.
+    wake_move_bps: float = 30.0  # floor
+    wake_move_atr: float = 0.5
+    wake_flat_multiplier: float = 2.0
+    min_wake_gap_flat_s: int = 60
+    min_wake_gap_position_s: int = 15
     notes_in_context: int = 10
     feedback_in_context: int = 15
     radar_rows_in_context: int = 10
@@ -101,6 +116,7 @@ class AgentRuntime:
         self._wake = asyncio.Event()
         self._wake_reason = "start"
         self._last_tick_mid: float | None = None
+        self._last_tick_end_ms = 0
         self._had_position = False
 
     # ------------------------------------------------------------ views for tools
@@ -110,19 +126,43 @@ class AgentRuntime:
             raise ToolInputError(f"{symbol!r} is not in the scanned universe (use radar symbols)")
 
     def radar_view(self, top: int) -> dict[str, Any]:
+        """Radar rows the agent can act on: coins too illiquid on the execution exchange
+        are left out (only counted), the rest carry their spread and depth there."""
         age_s = (now_ms() - self.radar.updated_ms) / 1000 if self.radar.updated_ms else None
+        liquidity = self.radar.liquidity
+        tradable = [r for r in self.radar.rows if liquidity.tradable(r.symbol) is not False]
         return {
             "universe_size": len(self.universe),
             "updated_s_ago": None if age_s is None else round(age_s),
-            "rows": [r.to_summary() for r in self.radar.rows[:top]],
+            "hidden_illiquid_on_execution_exchange": len(self.radar.rows) - len(tradable),
+            "liquidity_rule": (
+                f"{self.execution} spread <= {liquidity.max_spread_bps:g} bps and depth within "
+                f"10 bps >= {liquidity.min_depth_usd:,.0f} USDT on the thinner side"
+            ),
+            "rows": [{**r.to_summary(), **liquidity.summary(r.symbol)} for r in tradable[:top]],
         }
+
+    def radar_row(self, symbol: str) -> RadarRow | None:
+        return next((r for r in self.radar.rows if r.symbol == symbol), None)
+
+    def atr_5m(self, symbol: str) -> float | None:
+        row = self.radar_row(symbol)
+        atr = row.atr_5m if row else None
+        return atr if atr is not None and atr == atr else None  # NaN -> None
 
     def focus_view(self) -> dict[str, Any]:
         assert self.focus_symbol is not None
-        snap = self.tracker.snapshot(self.focus_symbol, now_ms())
+        symbol = self.focus_symbol
+        atr = self.atr_5m(symbol)
+        context = {
+            # Typical 5-minute range: the noise a stop has to survive.
+            "atr_5m_pct": None if atr is None else round(atr * 100, 3),
+            **self.radar.liquidity.summary(symbol),
+        }
+        snap = self.tracker.snapshot(symbol, now_ms())
         if snap is None:
-            return {"symbol": self.focus_symbol, "status": "waiting for the first live data"}
-        return snap.to_summary()
+            return {"symbol": symbol, "status": "waiting for the first live data", **context}
+        return {**snap.to_summary(), **context}
 
     async def price_history(self, symbol: str, interval: str, bars: int) -> list[Candle]:
         minutes = {"1m": 1, "5m": 5, "15m": 15, "1h": 60}[interval]
@@ -197,12 +237,23 @@ class AgentRuntime:
             polls += 1
             if self.focus_symbol is None or self._wake.is_set():
                 continue
-            book = self.tracker.snapshot(self.focus_symbol, now_ms())
-            mid = book.book[self.execution].mid if book and self.execution in book.book else None
-            if mid and self._last_tick_mid:
+            gap_s = (
+                self.config.min_wake_gap_position_s
+                if self._had_position
+                else self.config.min_wake_gap_flat_s
+            )
+            book = self.tracker.latest_book(self.execution, self.focus_symbol)
+            mid = book.mid if book else None
+            if mid and self._last_tick_mid and now_ms() - self._last_tick_end_ms >= gap_s * 1000:
                 move = abs(mid / self._last_tick_mid - 1) * 1e4
-                if move >= self.config.wake_move_bps:
-                    self._wake_reason = f"price moved {move:.0f} bps since the last check"
+                threshold = wake_threshold_bps(
+                    self.atr_5m(self.focus_symbol), self._had_position, self.config
+                )
+                if move >= threshold:
+                    self._wake_reason = (
+                        f"price moved {move:.0f} bps since the last check "
+                        f"(wake threshold {threshold:.0f} bps)"
+                    )
                     self._wake.set()
                     continue
             if self._had_position and polls % 5 == 0:  # positions: every ~10 s
@@ -243,6 +294,7 @@ class AgentRuntime:
         await self._remember_market_state()
 
     async def _remember_market_state(self) -> None:
+        self._last_tick_end_ms = now_ms()
         if self.focus_symbol:
             snap = self.tracker.snapshot(self.focus_symbol, now_ms())
             if snap and self.execution in snap.book:

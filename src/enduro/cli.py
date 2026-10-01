@@ -14,6 +14,7 @@ import sys
 from datetime import UTC, datetime
 
 from enduro.analytics.focus import WINDOWS_S, FocusSnapshot, FocusTracker
+from enduro.analytics.liquidity import LiquidityBook
 from enduro.analytics.market_state import MarketState
 from enduro.analytics.radar import RadarRow
 from enduro.analytics.radar_runner import RadarRunner
@@ -370,6 +371,9 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
             settings.storage.root,
             settings.scanner.history_days,
             settings.scanner.taker_fee_bps,
+            liquidity_source=execution,
+            min_depth_usd=settings.scanner.min_depth_10bps_usd,
+            max_spread_bps=settings.scanner.max_spread_bps,
         )
         log.info("preparing radar for %d symbols", len(symbols))
         await radar.prepare()
@@ -408,6 +412,10 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
                 max_llm_calls_per_tick=agent_cfg.max_llm_calls_per_tick,
                 max_tool_calls_per_tick=agent_cfg.max_tool_calls_per_tick,
                 wake_move_bps=agent_cfg.wake_move_bps,
+                wake_move_atr=agent_cfg.wake_move_atr,
+                wake_flat_multiplier=agent_cfg.wake_flat_multiplier,
+                min_wake_gap_flat_s=agent_cfg.min_wake_gap_flat_s,
+                min_wake_gap_position_s=agent_cfg.min_wake_gap_position_s,
             ),
             universe=symbols,
             reference=market.reference_exchange,
@@ -533,6 +541,9 @@ async def _scan(settings: Settings, top: int, as_json: bool, once: bool) -> None
             settings.storage.root,
             settings.scanner.history_days,
             settings.scanner.taker_fee_bps,
+            liquidity_source=execution,
+            min_depth_usd=settings.scanner.min_depth_10bps_usd,
+            max_spread_bps=settings.scanner.max_spread_bps,
         )
         await runner.prepare()
 
@@ -542,7 +553,10 @@ async def _scan(settings: Settings, top: int, as_json: bool, once: bool) -> None
                     json.dumps([r.to_summary() for r in rows[:top]], ensure_ascii=False), flush=True
                 )
             else:
-                print(_render_radar(rows[:top], reference.exchange, len(symbols)), flush=True)
+                print(
+                    _render_radar(rows[:top], reference.exchange, len(symbols), runner.liquidity),
+                    flush=True,
+                )
 
         if once:
             show(await runner.refresh())
@@ -554,7 +568,9 @@ async def _scan(settings: Settings, top: int, as_json: bool, once: bool) -> None
         await asyncio.gather(reference.close(), execution.close())
 
 
-def _render_radar(rows: list[RadarRow], exchange: str, universe_size: int) -> str:
+def _render_radar(
+    rows: list[RadarRow], exchange: str, universe_size: int, liquidity: LiquidityBook
+) -> str:
     def f(x: float, fmt: str) -> str:
         return "—" if x != x else format(x, fmt)  # NaN-safe
 
@@ -566,7 +582,8 @@ def _render_radar(rows: list[RadarRow], exchange: str, universe_size: int) -> st
         "day = 24h volume vs usual (in play?)",
         f"{'#':>2} {'symbol':<14}{'price':>11}{'score':>7}{'day':>6} │"
         f"{'15m chg':>9}{'move':>7}{'vol_x':>6}{'vlm_x':>6}{'v/24h':>6}{'eff':>6} │"
-        f"{'1h chg':>8}{'eff':>6} │{'exp':>6}{'atr5m':>7}{'mv/fee':>7}",
+        f"{'1h chg':>8}{'eff':>6} │{'exp':>6}{'atr5m':>7}{'mv/fee':>7} │"
+        f"{'bybit spr':>10}{'dep10':>7}",
     ]
     for i, r in enumerate(rows, 1):
         a, b = r.windows["15m"], r.windows["1h"]
@@ -577,9 +594,18 @@ def _render_radar(rows: list[RadarRow], exchange: str, universe_size: int) -> st
             f"{f(a.vol_ratio, '.1f'):>6}{f(a.volume_ratio, '.1f'):>6}"
             f"{f(a.volume_vs_24h, '.1f'):>6}{f(a.efficiency, '.2f'):>6} │"
             f"{f(b.change * 100, '+.2f'):>7}%{f(b.efficiency, '.2f'):>6} │"
-            f"{f(r.expansion, '.2f'):>6}{f(r.atr_5m * 100, '.2f'):>6}%{f(r.move_vs_fees, '.1f'):>7}"
+            f"{f(r.expansion, '.2f'):>6}{f(r.atr_5m * 100, '.2f'):>6}%"
+            f"{f(r.move_vs_fees, '.1f'):>7} │" + _render_liquidity(liquidity, r.symbol)
         )
     return "\n".join(lines)
+
+
+def _render_liquidity(liquidity: LiquidityBook, symbol: str) -> str:
+    liq = liquidity.typical(symbol)
+    if liq is None:
+        return f"{'—':>10}{'—':>7}"
+    mark = "" if liquidity.tradable(symbol) else " x"
+    return f"{liq.spread_bps:>8.1f}bp{liq.depth_usd / 1e3:>6.1f}k{mark}"
 
 
 def _render(state: MarketState, settings: Settings, dropped: int, sink: ParquetSink | None) -> str:

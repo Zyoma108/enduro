@@ -48,6 +48,10 @@ class ScannerConfig(BaseModel):
     asset_classes: list[Literal["crypto", "tradfi"]] = Field(default_factory=lambda: ["crypto"])
     # Candle history used to compute "normal" volatility and volume per hour of day.
     history_days: int = Field(default=28, ge=1)
+    # Tradable on the execution exchange: resting depth within ±10 bps of mid on the thinner
+    # side (USDT) and spread, judged on the median of the last few book snapshots.
+    min_depth_10bps_usd: float = Field(default=2_000.0, ge=0)
+    max_spread_bps: float = Field(default=10.0, gt=0)
     # Taker fee on the execution exchange, bps per side (Bybit VIP0 perps: 5.5).
     taker_fee_bps: float = Field(default=5.5, ge=0)
 
@@ -88,6 +92,10 @@ class AgentSettings(BaseModel):
     max_llm_calls_per_tick: int = Field(default=8, ge=1)
     max_tool_calls_per_tick: int = Field(default=16, ge=2)
     wake_move_bps: float = Field(default=30.0, gt=0)
+    wake_move_atr: float = Field(default=0.5, gt=0)
+    wake_flat_multiplier: float = Field(default=2.0, ge=1)
+    min_wake_gap_flat_s: int = Field(default=60, ge=0)
+    min_wake_gap_position_s: int = Field(default=15, ge=0)
 
 
 class ApiKey(BaseModel):

@@ -1,14 +1,17 @@
 import asyncio
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from enduro.agent.llm import LLMTurn, ToolCall, ToolResult, Usage
 from enduro.agent.prompt import render_prompt
-from enduro.agent.runtime import AgentConfig, AgentRuntime
+from enduro.agent.runtime import AgentConfig, AgentRuntime, wake_threshold_bps
 from enduro.agent.tools import TOOLS
 from enduro.analytics.focus import FocusTracker
+from enduro.analytics.liquidity import Liquidity, LiquidityBook, liquidity_from_book
+from enduro.core.models import OrderBook
 from enduro.execution.models import Position
 from enduro.journal.journal import Journal
 from enduro.risk.manager import RiskLimits, RiskManager, RiskStateStore
@@ -55,11 +58,22 @@ def turn(*calls: ToolCall, text: str = "") -> LLMTurn:
     return LLMTurn(text, list(calls), "tool_use" if calls else "end_turn", Usage(cost_usd=0.01))
 
 
+@dataclass
+class FakeRow:
+    symbol: str
+    atr_5m: float = 0.01
+    score: float = 1.0
+
+    def to_summary(self):
+        return {"symbol": self.symbol, "score": self.score}
+
+
 class FakeRadar:
     updated_ms = 1
 
     def __init__(self) -> None:
         self.rows: list = []
+        self.liquidity = LiquidityBook(min_depth_usd=2_000, max_spread_bps=10)
 
     async def refresh(self):
         return []
@@ -83,7 +97,7 @@ class FakeTrading:
 
     async def open(self, intent, thesis):
         self.opened.append((intent, thesis))
-        return {"opened": True, "qty": 1.0}
+        return {"opened": True, "qty": 1.0, "avg_price": 120.0}
 
 
 def runtime(
@@ -316,3 +330,75 @@ async def test_tooling_feedback_is_journaled_and_shown_next_tick(tmp_path):
     assert "[missing_data] no open interest" in second_user
     bad = next(r[0] for kind, r in llm.log if kind == "results")
     assert bad.is_error and "'category' must be one of" in bad.content
+
+
+# ---------------------------------------------------------------- wake-ups, liquidity, ATR
+
+
+def test_wake_threshold_scales_with_volatility_and_position():
+    cfg = AgentConfig(wake_move_bps=30, wake_move_atr=0.5, wake_flat_multiplier=2.0)
+    assert wake_threshold_bps(0.035, True, cfg) == pytest.approx(175)  # MOVR-like, in position
+    assert wake_threshold_bps(0.035, False, cfg) == pytest.approx(350)  # flat: doubled
+    assert wake_threshold_bps(0.0015, True, cfg) == 30  # calm coin: the floor applies
+    assert wake_threshold_bps(None, False, cfg) == 60
+
+
+def liq(spread, bid, ask):
+    return Liquidity(spread_bps=spread, depth_bid_usd=bid, depth_ask_usd=ask, ts=0)
+
+
+def test_liquidity_from_book_and_median_judgement():
+    book = OrderBook(
+        "bybit", "X", 0, 0, bids=((99.95, 30.0), (99.0, 999.0)), asks=((100.05, 10.0),)
+    )
+    snapshot = liquidity_from_book(book)
+    assert snapshot.spread_bps == pytest.approx(10.0)
+    assert snapshot.depth_bid_usd == pytest.approx(99.95 * 30)  # 99.0 is outside 10 bps
+    assert snapshot.depth_usd == pytest.approx(1000.5)  # the thinner side
+
+    lb = LiquidityBook(min_depth_usd=2_000, max_spread_bps=10, keep=3)
+    assert lb.tradable("X") is None  # unknown is not the same as illiquid
+    lb.add({"X": liq(2, 5_000, 6_000)}, 1)
+    lb.add({"X": liq(2, 500, 6_000)}, 2)  # one momentarily thin snapshot...
+    lb.add({"X": liq(3, 4_000, 6_000)}, 3)
+    assert lb.tradable("X") is True  # ...does not flip the median
+    lb.add({"X": liq(15, 4_000, 6_000)}, 4)
+    lb.add({"X": liq(14, 4_000, 6_000)}, 5)
+    assert lb.tradable("X") is False  # wide spread for most of the window
+    assert lb.summary("X")["bybit_spread_bps"] == 14
+
+
+async def test_radar_view_hides_illiquid_coins_and_focus_shows_atr(tmp_path):
+    rt, *_ = runtime(tmp_path, ScriptedLLM([]))
+    rt.radar.rows = [FakeRow("SOL/USDT:USDT", atr_5m=0.012), FakeRow("ETH/USDT:USDT")]
+    rt.radar.liquidity.add(
+        {"SOL/USDT:USDT": liq(2, 50_000, 60_000), "ETH/USDT:USDT": liq(20, 100, 100)}, 1
+    )
+    view = rt.radar_view(10)
+    assert [r["symbol"] for r in view["rows"]] == ["SOL/USDT:USDT"]
+    assert view["hidden_illiquid_on_execution_exchange"] == 1
+    assert view["rows"][0]["bybit_depth_10bps_usd"] == 50_000
+
+    await rt.set_focus("SOL/USDT:USDT", "test")
+    focus = rt.focus_view()
+    assert focus["atr_5m_pct"] == 1.2 and focus["tradable"] is True
+
+
+async def test_open_reports_stop_distance_in_atr_and_focus_warns_on_illiquid(tmp_path):
+    llm = ScriptedLLM(
+        [
+            [
+                turn(call("set_focus", symbol="ETH/USDT:USDT", reason="x")),
+                turn(call("open_position", side="long", stop_loss=119.76, thesis="t")),
+                turn(call("finish_tick", next_check_seconds=60, note="n")),
+            ]
+        ]
+    )
+    rt, *_ = runtime(tmp_path, llm)
+    rt.radar.rows = [FakeRow("ETH/USDT:USDT", atr_5m=0.01)]
+    rt.radar.liquidity.add({"ETH/USDT:USDT": liq(20, 100, 100)}, 1)
+    await rt.tick("start")
+    results = [json.loads(r[0].content) for kind, r in llm.log if kind == "results"]
+    assert "illiquid" in results[0]["warning"]
+    assert results[1]["stop_distance_pct"] == pytest.approx(0.2)
+    assert results[1]["stop_distance_in_atr_5m"] == pytest.approx(0.2)

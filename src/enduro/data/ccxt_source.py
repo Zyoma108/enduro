@@ -175,11 +175,15 @@ class CcxtSource:
         )
         return {s: float(t.get("quoteVolume") or 0.0) for s, t in tickers.items()}
 
-    async def fetch_top_of_book(self, symbol: str) -> OrderBook:
+    async def fetch_order_book(self, symbol: str, limit: int) -> OrderBook:
+        """REST snapshot of the top `limit` levels per side."""
         raw = await with_retries(
-            lambda: self._client.fetch_order_book(symbol, 1), f"{self.exchange} order book"
+            lambda: self._client.fetch_order_book(symbol, limit), f"{self.exchange} order book"
         )
-        return book_from_ccxt(self.exchange, {**raw, "symbol": symbol}, 1, now_ms())
+        return book_from_ccxt(self.exchange, {**raw, "symbol": symbol}, limit, now_ms())
+
+    async def fetch_top_of_book(self, symbol: str) -> OrderBook:
+        return await self.fetch_order_book(symbol, 1)
 
     async def fetch_candles(
         self, symbol: str, since: int, limit: int = 1000, timeframe: str = "1m"

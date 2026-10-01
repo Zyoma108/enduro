@@ -120,11 +120,18 @@ async def set_focus(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
     reason = _text(args, "reason")
     rt.require_known_symbol(symbol)
     await rt.set_focus(symbol, reason)
-    return {
+    result: dict[str, Any] = {
         "focus": symbol,
         "note": "live trades and order books are streaming now; flow metrics need a few "
         "minutes to fill — use get_price_history meanwhile",
     }
+    if rt.radar.liquidity.tradable(symbol) is False:
+        result["warning"] = (
+            f"{symbol} is illiquid on {rt.execution} "
+            f"({rt.radar.liquidity.summary(symbol)}): spread and slippage will eat most "
+            "intraday moves"
+        )
+    return result
 
 
 async def release_focus(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
@@ -153,7 +160,14 @@ async def open_position(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any
         take_profit=_num(args, "take_profit", required=False) or None,
         risk_pct=risk_pct,
     )
-    return await rt.trading.open(intent, thesis=_text(args, "thesis"))
+    result = await rt.trading.open(intent, thesis=_text(args, "thesis"))
+    entry = result.get("avg_price") or (result.get("would_open") or {}).get("expected_entry")
+    if entry:
+        distance = abs(entry - intent.stop_loss) / entry
+        result["stop_distance_pct"] = round(distance * 100, 3)
+        if (atr := rt.atr_5m(intent.symbol)) and atr > 0:
+            result["stop_distance_in_atr_5m"] = round(distance / atr, 2)
+    return result
 
 
 async def close_position(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:

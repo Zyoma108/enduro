@@ -8,6 +8,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from enduro.analytics.baseline import load_baselines
+from enduro.analytics.liquidity import LiquidityBook, scan_liquidity
 from enduro.analytics.radar import LOOKBACK_MINUTES, Radar, RadarRow
 from enduro.core.models import MINUTE_MS, Candle, now_ms
 from enduro.data.base import MarketDataSource
@@ -17,6 +18,7 @@ from enduro.storage.candles import last_candle_ts, load_recent_candles, write_ca
 log = logging.getLogger(__name__)
 
 PERSIST_EVERY_MS = 60 * MINUTE_MS
+LIQUIDITY_EVERY_MS = 5 * MINUTE_MS
 
 
 class RadarRunner:
@@ -27,6 +29,9 @@ class RadarRunner:
         root: Path,
         history_days: int,
         taker_fee_bps: float,
+        liquidity_source: MarketDataSource | None = None,
+        min_depth_usd: float = 2_000.0,
+        max_spread_bps: float = 10.0,
     ) -> None:
         self.source = source
         self.symbols = list(symbols)
@@ -36,6 +41,9 @@ class RadarRunner:
         self.radar: Radar | None = None
         self.rows: list[RadarRow] = []
         self.updated_ms = 0
+        # Execution-exchange order books: is the coin actually tradable there?
+        self.liquidity_source = liquidity_source
+        self.liquidity = LiquidityBook(min_depth_usd, max_spread_bps)
         self._pending: list[Candle] = []
         self._last_persist = now_ms()
 
@@ -78,6 +86,9 @@ class RadarRunner:
             now,
             collect,
         )
+        if self.liquidity_source and now - self.liquidity.updated_ms >= LIQUIDITY_EVERY_MS:
+            snapshots = await scan_liquidity(self.liquidity_source, self.symbols)
+            self.liquidity.add(snapshots, now)
         self.rows = radar.scan(self.symbols)
         self.updated_ms = now
         if now - self._last_persist >= PERSIST_EVERY_MS:
