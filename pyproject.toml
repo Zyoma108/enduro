@@ -42,3 +42,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test fixtures read best as concatenated row lists.
+"tests/**" = ["RUF005"]

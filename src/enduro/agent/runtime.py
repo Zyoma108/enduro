@@ -30,8 +30,10 @@ from enduro.agent.llm import (
 )
 from enduro.agent.tools import TOOLS, TOOLS_BY_NAME, ToolInputError, to_json
 from enduro.analytics.focus import FocusTracker
+from enduro.analytics.metrics import Bars
 from enduro.analytics.radar import RadarRow
 from enduro.analytics.radar_runner import RadarRunner
+from enduro.analytics.stops import stop_context
 from enduro.core.models import MINUTE_MS, Candle, now_ms
 from enduro.data.base import MarketDataSource
 from enduro.data.collector import Collector
@@ -150,6 +152,18 @@ class AgentRuntime:
         row = self.radar_row(symbol)
         atr = row.atr_5m if row else None
         return atr if atr is not None and atr == atr else None  # NaN -> None
+
+    def stop_context(self, side: str, minutes: int = 120) -> dict[str, Any]:
+        assert self.focus_symbol is not None
+        symbol = self.focus_symbol
+        candles = self.radar.radar.candles(symbol, minutes) if self.radar.radar else []
+        if len(candles) < 30:
+            raise ToolInputError(f"not enough 1m history for {symbol} yet ({len(candles)} bars)")
+        book = self.tracker.latest_book(self.execution, symbol)
+        price = book.mid if book and book.mid else candles[-1].close
+        context = stop_context(Bars.from_candles(candles), price, side, self.atr_5m(symbol))
+        context["source"] = f"{self.reference} 1m candles; price = {self.execution} mid"
+        return context
 
     def focus_view(self) -> dict[str, Any]:
         assert self.focus_symbol is not None

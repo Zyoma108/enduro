@@ -136,6 +136,11 @@ class Radar:
         self._candles: dict[str, deque[Candle]] = {}
         self._lookback = lookback_minutes
 
+    def candles(self, symbol: str, minutes: int) -> list[Candle]:
+        """The last `minutes` closed 1m candles held for `symbol` (oldest first)."""
+        buf = self._candles.get(symbol)
+        return list(buf)[-minutes:] if buf else []
+
     def last_ts(self) -> dict[str, int]:
         return {s: c[-1].ts for s, c in self._candles.items() if c}
 

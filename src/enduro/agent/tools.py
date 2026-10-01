@@ -115,6 +115,12 @@ async def get_price_history(rt: AgentRuntime, args: dict[str, Any]) -> dict[str,
     }
 
 
+async def get_stop_context(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
+    if rt.focus_symbol is None:
+        raise ToolInputError("no focus symbol; call set_focus first")
+    return rt.stop_context(_side(args))
+
+
 async def set_focus(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
     symbol = str(args.get("symbol") or "")
     reason = _text(args, "reason")
@@ -259,6 +265,18 @@ TOOLS: list[Tool] = [
             ),
         ),
         get_price_history,
+    ),
+    Tool(
+        ToolSpec(
+            "get_stop_context",
+            "Where stops get swept on the focus coin (last ~2h of 1m candles): typical 1m "
+            "wicks, how far recent false breaks of swing highs/lows went past the level "
+            "before reversing, and the nearest swing levels on the stop side of a long or a "
+            "short with their distance in % and in 5m ATR, plus each level pushed beyond "
+            "the 90th-percentile sweep. Use it before choosing a stop.",
+            _schema({"side": _SIDE}, ["side"]),
+        ),
+        get_stop_context,
     ),
     Tool(
         ToolSpec(
