@@ -172,6 +172,32 @@ async def update_protection(rt: AgentRuntime, args: dict[str, Any]) -> dict[str,
     return await rt.trading.protect(rt.focus_symbol, _side(args), stop, take)
 
 
+FEEDBACK_CATEGORIES = [
+    "missing_data",
+    "missing_tool",
+    "tool_problem",
+    "execution",
+    "risk_limit",
+    "other",
+]
+
+
+async def report_tooling_gap(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
+    category = args.get("category")
+    if category not in FEEDBACK_CATEGORIES:
+        raise ToolInputError(f"'category' must be one of {FEEDBACK_CATEGORIES}")
+    rt.journal.write(
+        "feedback",
+        n=rt.tick_no,
+        focus=rt.focus_symbol,
+        category=category,
+        title=_text(args, "title"),
+        details=_text(args, "details"),
+        impact=str(args.get("impact") or "").strip(),
+    )
+    return {"recorded": True, "note": "thanks — the developers read these to improve your tools"}
+
+
 async def finish_tick(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
     seconds = int(_num(args, "next_check_seconds") or 0)
     if not MIN_CHECK_S <= seconds <= MAX_CHECK_S:
@@ -292,6 +318,25 @@ TOOLS: list[Tool] = [
             ),
         ),
         update_protection,
+    ),
+    Tool(
+        ToolSpec(
+            "report_tooling_gap",
+            "Tell the developers about a limitation that kept you from trading well or "
+            "from making (more) profit: data you needed but could not get, a tool that is "
+            "missing or behaves badly, execution problems, a risk limit that blocked a "
+            "sound trade. Report each distinct issue once; it does not end the check.",
+            _schema(
+                {
+                    "category": {"type": "string", "enum": FEEDBACK_CATEGORIES},
+                    "title": {"type": "string"},
+                    "details": {"type": "string"},
+                    "impact": {"type": "string"},
+                },
+                ["category", "title", "details"],
+            ),
+        ),
+        report_tooling_gap,
     ),
     Tool(
         ToolSpec(

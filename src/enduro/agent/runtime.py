@@ -52,6 +52,7 @@ class AgentConfig:
     max_tool_calls_per_tick: int = 16
     wake_move_bps: float = 30.0  # wake early when the focus price moves this much
     notes_in_context: int = 10
+    feedback_in_context: int = 15
     radar_rows_in_context: int = 10
 
 
@@ -278,6 +279,10 @@ class AgentRuntime:
             f"[{n.get('focus') or 'search'}] {n['text']}"
             for n in notes
         ] or ["- (none yet)"]
+        reported = self.journal.recent("feedback", self.config.feedback_in_context)
+        if reported:
+            parts += ["", "## Tooling gaps you already reported (don't repeat them)"]
+            parts += [f"- [{r['category']}] {r['title']}" for r in reported]
         parts += ["", "Decide what to do now. End the check with finish_tick."]
         return "\n".join(parts)
 

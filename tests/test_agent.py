@@ -282,3 +282,37 @@ def test_scripted_llm_is_exhausted_cleanly():
     llm = ScriptedLLM([[turn(text="hi")]])
     session = llm.session("s", [])
     assert asyncio.run(session.send("x")).text == "hi"
+
+
+async def test_tooling_feedback_is_journaled_and_shown_next_tick(tmp_path):
+    llm = ScriptedLLM(
+        [
+            [
+                turn(
+                    call(
+                        "report_tooling_gap",
+                        category="missing_data",
+                        title="no open interest",
+                        details="cannot tell new longs from short covering",
+                        impact="skipped a breakout",
+                    ),
+                    call("finish_tick", next_check_seconds=60, note="n"),
+                )
+            ],
+            [
+                turn(call("report_tooling_gap", category="wishes", title="x", details="y")),
+                turn(call("finish_tick", next_check_seconds=60, note="n")),
+            ],
+        ]
+    )
+    rt, *_, journal = runtime(tmp_path, llm)
+    await rt.tick("start")
+    feedback = journal.recent("feedback", 5)
+    assert feedback[0]["title"] == "no open interest"
+    assert feedback[0]["impact"] == "skipped a breakout"
+
+    await rt.tick("scheduled")
+    second_user = [m for kind, m in llm.log if kind == "user"][1]
+    assert "[missing_data] no open interest" in second_user
+    bad = next(r[0] for kind, r in llm.log if kind == "results")
+    assert bad.is_error and "'category' must be one of" in bad.content

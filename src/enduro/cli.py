@@ -450,6 +450,30 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
         )
 
 
+def _feedback(settings: Settings, days: int) -> None:
+    from datetime import timedelta
+
+    from enduro.journal.journal import Journal
+
+    journal = Journal(settings.agent.journal_dir)
+    today = datetime.now(UTC)
+    records = [
+        r
+        for d in range(days - 1, -1, -1)
+        for r in journal.read(f"{today - timedelta(days=d):%Y-%m-%d}")
+        if r["kind"] == "feedback"
+    ]
+    if not records:
+        print("no tooling feedback from the agent yet")
+        return
+    for r in records:
+        stamp = datetime.fromtimestamp(r["ts"] / 1000, UTC)
+        print(f"{stamp:%m-%d %H:%M} [{r['category']}] {r['title']}  ({r.get('focus') or 'search'})")
+        print(f"    {r['details']}")
+        if r.get("impact"):
+            print(f"    impact: {r['impact']}")
+
+
 async def _universe(settings: Settings) -> None:
     market = settings.market
     reference = CcxtSource(market.reference_exchange, market_type=market.market_type)
@@ -633,6 +657,9 @@ def main() -> None:
     )
     agent.add_argument("--ticks", type=int, help="stop after N ticks")
 
+    feedback = commands.add_parser("feedback", help="tooling gaps reported by the agent")
+    feedback.add_argument("--days", type=int, default=7, help="how many days back")
+
     sql = commands.add_parser("sql", help="query recorded data (views: trades, books)")
     sql.add_argument("query", help='e.g. "select exchange, count(*) from trades group by 1"')
 
@@ -669,6 +696,8 @@ def main() -> None:
     elif args.command == "agent":
         with contextlib.suppress(asyncio.CancelledError):
             asyncio.run(_agent(settings, args.dry_run, args.ticks))
+    elif args.command == "feedback":
+        _feedback(settings, args.days)
     elif args.command == "sql":
         try:
             store.connect(settings.storage.root).sql(args.query).show(max_rows=100)
