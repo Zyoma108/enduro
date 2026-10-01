@@ -120,6 +120,14 @@ def format_record(r: dict[str, Any], verbose: bool = False) -> str | None:
         return _order(r)
     if kind == "alert":
         return _alert(r)
+    if kind == "closed":
+        t = r.get("trade") or {}
+        return (
+            f"CLOSED {t.get('side')} {_short(t.get('symbol'))} {_num(t.get('qty'))}"
+            f" {_num(t.get('entry_price'))} → {_num(t.get('exit_price'))}"
+            f" · net PnL {t.get('pnl', 0):+.2f} (fees {t.get('fees', 0):.2f})"
+            f" · by {r.get('closed_by')}"
+        )
     if kind == "note":
         meta = [f"tick {r.get('n')}", _short(r.get("focus"))]
         if r.get("next_check_s") is not None:

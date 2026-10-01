@@ -44,3 +44,23 @@ def test_alerts_expire_and_are_limited():
 def test_bad_alerts_are_rejected(level, direction, ttl, fragment):
     with pytest.raises(ValueError, match=fragment):
         AlertBook().add("X", level, direction, "n", ttl_min=ttl, now_ms=T0)
+
+
+def test_alerts_survive_a_restart_and_expired_ones_are_dropped(tmp_path):
+    path = tmp_path / "alerts.json"
+    book = AlertBook(path=path)
+    book.add("X", 100.0, "above", "breakout", ttl_min=60, now_ms=T0)
+    book.add("X", 90.0, "below", "breakdown", ttl_min=1, now_ms=T0)
+    book.cancel(99)  # unknown id: nothing changes
+
+    restarted = AlertBook(path=path)
+    assert [a.note for a in restarted.active(T0 + 30_000)] == ["breakout", "breakdown"]
+    assert [a.note for a in restarted.active(T0 + 2 * MINUTE_MS)] == ["breakout"]
+    assert restarted.add("X", 1.0, "below", "next", ttl_min=5, now_ms=T0).id == 3  # ids go on
+    assert [a.id for a in AlertBook(path=path).active(T0 + 2 * MINUTE_MS)] == [1, 3]
+
+
+def test_a_corrupt_alert_file_starts_empty(tmp_path):
+    path = tmp_path / "alerts.json"
+    path.write_text("{oops")
+    assert AlertBook(path=path).active(T0) == []

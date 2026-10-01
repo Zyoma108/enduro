@@ -12,6 +12,7 @@ import shutil
 import signal
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 from enduro.analytics.focus import WINDOWS_S, FocusSnapshot, FocusTracker
 from enduro.analytics.liquidity import LiquidityBook
@@ -327,6 +328,7 @@ def _risk(settings: Settings, reset: bool) -> None:
 
 async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> None:
     _cancel_on_shutdown_signals()
+    from enduro.agent.alerts import AlertBook
     from enduro.agent.claude import ClaudeClient
     from enduro.agent.claude_code import ClaudeCodeBackend
     from enduro.agent.prompt import render_prompt
@@ -430,6 +432,7 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
             reference=market.reference_exchange,
             execution=market.execution_exchange,
             focus_events=events,
+            alerts=AlertBook(path=Path(agent_cfg.journal_dir).parent / "alerts.json"),
         )
         open_positions = await gateway.positions()
         if open_positions:

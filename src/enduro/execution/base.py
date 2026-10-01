@@ -8,6 +8,7 @@ from typing import Protocol
 from enduro.execution.models import (
     AccountState,
     Balance,
+    ClosedTrade,
     InstrumentRules,
     OrderRequest,
     OrderResult,
@@ -56,5 +57,9 @@ class ExecutionGateway(Protocol):
     async def cancel_order(self, order_id: str, symbol: str) -> OrderResult: ...
 
     async def open_orders(self, symbol: str | None = None) -> list[OrderResult]: ...
+
+    async def closed_trades(self, limit: int = 10) -> list[ClosedTrade]:
+        """Most recently closed positions, newest first, with PnL net of fees."""
+        ...
 
     async def close(self) -> None: ...

@@ -97,10 +97,22 @@ class RadarRunner:
         return self.rows
 
     async def run_forever(self, on_update: Callable[[list[RadarRow]], None] | None = None) -> None:
+        """Refresh after every closed minute. A failed refresh (network outage, exchange
+        hiccup) keeps the last ranking — `updated_ms` shows its age — and is retried at
+        the next minute instead of bringing everything down."""
         while True:
-            rows = await self.refresh()
-            if on_update:
-                on_update(rows)
+            try:
+                rows = await self.refresh()
+                if on_update:
+                    on_update(rows)
+            except Exception as e:
+                age_s = (now_ms() - self.updated_ms) / 1000 if self.updated_ms else None
+                log.warning(
+                    "radar refresh failed (%s: %s); last update %s s ago",
+                    type(e).__name__,
+                    e,
+                    "never" if age_s is None else f"{age_s:.0f}",
+                )
             # Wake a few seconds after the next minute closes, when exchanges have the candle.
             next_minute = (now_ms() // MINUTE_MS + 1) * MINUTE_MS
             await asyncio.sleep((next_minute - now_ms()) / 1000 + 3)

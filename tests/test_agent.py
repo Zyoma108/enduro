@@ -558,3 +558,89 @@ async def test_tick_limit_with_open_position_keeps_managing_until_flat(tmp_path)
     assert any(r["kind"] == "session" for r in records)
     situation = next(text for kind, text in llm.log if kind == "user" and "Tick 2" in text)
     assert "## Session ending" in situation
+
+
+# ---------------------------------------------------------------- closed trades
+
+
+class FakeGateway:
+    def __init__(self, trades) -> None:
+        self.trades = trades
+
+    async def closed_trades(self, limit=10):
+        return self.trades[:limit]
+
+
+async def test_exchange_closes_are_journaled_once_and_shown_to_the_agent(tmp_path):
+    from enduro.core.models import now_ms
+    from enduro.execution.models import ClosedTrade
+
+    now = now_ms()
+    aave, zro, qnt = "AAVE/USDT:USDT", "ZRO/USDT:USDT", "QNT/USDT:USDT"
+    take_profit = ClosedTrade("tp-1", aave, "long", 5.06, 168.42, 170.4, 9.08, 0.94, now)
+    ours = ClosedTrade("c-1", zro, "short", 211.9, 1.7465, 1.7545, -2.1, 0.41, now - 1)
+    old = ClosedTrade("x-0", qnt, "short", 1.0, 1.0, 1.0, 0.0, 0.0, now - 2 * 86_400_000)
+    llm = ScriptedLLM([[turn(call("finish_tick", next_check_seconds=60, note="n"))] for _ in "ab"])
+    rt, trading, _, journal = runtime(tmp_path, llm)
+    trading.gateway = FakeGateway([take_profit, ours, old])  # newest first
+    journal.write("order", action="close", result={"id": "c-1"}, reason="thesis broken")
+
+    await rt.tick("start")
+    await rt.tick("scheduled")
+
+    records = journal.read(f"{datetime.now(UTC):%Y-%m-%d}")
+    closed = [r for r in records if r["kind"] == "closed"]
+    assert [(r["trade"]["symbol"], r["closed_by"]) for r in closed] == [
+        ("ZRO/USDT:USDT", "agent"),
+        ("AAVE/USDT:USDT", "exchange: stop loss / take profit"),
+    ]  # once each, oldest first; the 2-day-old close is not journaled late
+    situation = next(text for kind, text in llm.log if kind == "user")
+    section = situation.split("## Recently closed positions")[1]
+    assert section.index("AAVE") < section.index("ZRO")  # newest first
+    assert '"pnl_usdt_net_of_fees": 9.08' in section
+
+
+# ---------------------------------------------------------------- resilience
+
+
+async def test_tick_survives_an_exchange_outage_and_retries_soon(tmp_path):
+    rt, trading, _, journal = runtime(tmp_path, ScriptedLLM([]))
+    rt.focus_symbol = "SOL/USDT:USDT"
+    trading.positions = [{"symbol": "SOL/USDT:USDT", "side": "long"}]
+    rt._had_position = True
+
+    async def down():
+        raise ConnectionError("network is unreachable")
+
+    trading.account = down
+    await rt.tick("scheduled")  # must not raise
+    errors = [r for r in journal.read(f"{datetime.now(UTC):%Y-%m-%d}") if r["kind"] == "error"]
+    assert errors[0]["what"] == "tick" and "network is unreachable" in errors[0]["error"]
+    assert rt._had_position  # unknown → keep the last known state
+    from enduro.core.models import now_ms
+
+    assert 25_000 <= rt._next_check_ms - now_ms() <= 31_000
+
+
+async def test_radar_keeps_running_after_a_failed_refresh(monkeypatch):
+    from enduro.analytics.radar_runner import RadarRunner
+
+    runner = RadarRunner(None, [], Path("."), history_days=1, taker_fee_bps=5.5)
+    calls = []
+
+    async def refresh():
+        calls.append(1)
+        if len(calls) == 1:
+            raise ConnectionError("outage")
+        return []
+
+    async def no_sleep(_s):
+        if len(calls) >= 2:
+            raise asyncio.CancelledError
+
+    runner.refresh = refresh
+    monkeypatch.setattr("enduro.analytics.radar_runner.asyncio.sleep", no_sleep)
+    updates = []
+    with pytest.raises(asyncio.CancelledError):
+        await runner.run_forever(updates.append)
+    assert len(calls) == 2 and updates == [[]]  # the failure was survived, the retry updated

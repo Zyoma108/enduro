@@ -44,6 +44,11 @@ from enduro.trading.service import TradingService
 
 log = logging.getLogger(__name__)
 
+RETRY_AFTER_ERROR_S = 30  # a tick that failed (model or exchange down) is retried this soon
+CLOSED_TRADES_FETCHED = 10
+CLOSED_TRADES_IN_CONTEXT = 5
+CLOSED_TRADES_HORIZON_MS = 24 * 3_600_000  # older closes are not journaled late
+
 
 def wake_threshold_bps(atr_5m: float | None, in_position: bool, config: AgentConfig) -> float:
     """How far the price must move since the last check to wake the agent early."""
@@ -92,6 +97,7 @@ class AgentRuntime:
         reference: str,
         execution: str,
         focus_events: asyncio.Queue | None = None,
+        alerts: AlertBook | None = None,
     ) -> None:
         # A plain LLM client gets our own tool loop; a backend (e.g. Claude Code) runs its own.
         self.backend: EpisodeBackend = (
@@ -123,11 +129,12 @@ class AgentRuntime:
         self._last_tick_mid: float | None = None
         self._last_tick_end_ms = 0
         self._had_position = False
-        self.alerts = AlertBook()
+        self.alerts = alerts or AlertBook()
         self._fired_alerts: list[FiredAlert] = []
         self._in_tick = False
         # Tick limit reached with a position open: keep managing it, no new entries.
         self.wind_down = False
+        self._known_closed: set[str] | None = None  # closing order ids already journaled
 
     # ------------------------------------------------------------ views for tools
 
@@ -323,36 +330,45 @@ class AgentRuntime:
             self.tracker.on_event(await queue.get())
 
     async def _watchdog(self) -> None:
-        """Wake the agent early on a sharp move or when the exchange closed the position."""
+        """Wake the agent early on a sharp move or when the exchange closed the position.
+        Survives exchange/network errors: a failed poll is retried on the next one."""
         polls = 0
         while True:
             await asyncio.sleep(2)
             polls += 1
             if self.focus_symbol is None or self._wake.is_set() or self._in_tick:
                 continue
-            gap_s = (
-                self.config.min_wake_gap_position_s
-                if self._had_position
-                else self.config.min_wake_gap_flat_s
+            try:
+                await self._watch_once(polls)
+            except Exception as e:
+                if polls % 15 == 0:  # don't flood the log during an outage
+                    log.warning("watchdog poll failed: %s: %s", type(e).__name__, e)
+
+    async def _watch_once(self, polls: int) -> None:
+        assert self.focus_symbol is not None
+        gap_s = (
+            self.config.min_wake_gap_position_s
+            if self._had_position
+            else self.config.min_wake_gap_flat_s
+        )
+        book = self.tracker.latest_book(self.execution, self.focus_symbol)
+        mid = book.mid if book else None
+        if mid and self._last_tick_mid and now_ms() - self._last_tick_end_ms >= gap_s * 1000:
+            move = abs(mid / self._last_tick_mid - 1) * 1e4
+            threshold = wake_threshold_bps(
+                self.atr_5m(self.focus_symbol), self._had_position, self.config
             )
-            book = self.tracker.latest_book(self.execution, self.focus_symbol)
-            mid = book.mid if book else None
-            if mid and self._last_tick_mid and now_ms() - self._last_tick_end_ms >= gap_s * 1000:
-                move = abs(mid / self._last_tick_mid - 1) * 1e4
-                threshold = wake_threshold_bps(
-                    self.atr_5m(self.focus_symbol), self._had_position, self.config
+            if move >= threshold:
+                self._wake_reason = (
+                    f"price moved {move:.0f} bps since the last check "
+                    f"(wake threshold {threshold:.0f} bps)"
                 )
-                if move >= threshold:
-                    self._wake_reason = (
-                        f"price moved {move:.0f} bps since the last check "
-                        f"(wake threshold {threshold:.0f} bps)"
-                    )
-                    self._wake.set()
-                    continue
-            if self._had_position and polls % 5 == 0:  # positions: every ~10 s
-                if not await self.has_open_position(self.focus_symbol):
-                    self._wake_reason = "position closed on the exchange (stop or take profit)"
-                    self._wake.set()
+                self._wake.set()
+                return
+        if self._had_position and polls % 5 == 0:  # positions: every ~10 s
+            if not await self.has_open_position(self.focus_symbol):
+                self._wake_reason = "position closed on the exchange (stop or take profit)"
+                self._wake.set()
 
     async def tick(self, trigger: str) -> None:
         self.tick_no += 1
@@ -367,6 +383,11 @@ class AgentRuntime:
         except LLMError as e:
             log.error("tick %d: %s", self.tick_no, e)
             self.journal.write("error", what="llm", error=str(e))
+            self._next_check_ms = self._next_check_ms or now_ms() + RETRY_AFTER_ERROR_S * 1000
+        except Exception as e:  # exchange / network down: try again soon, don't die
+            log.error("tick %d failed: %s: %s", self.tick_no, type(e).__name__, e)
+            self.journal.write("error", what="tick", error=f"{type(e).__name__}: {e}")
+            self._next_check_ms = self._next_check_ms or now_ms() + RETRY_AFTER_ERROR_S * 1000
         default_s = (
             self.config.focus_interval_s if self.focus_symbol else self.config.search_interval_s
         )
@@ -404,12 +425,53 @@ class AgentRuntime:
             snap = self.tracker.snapshot(self.focus_symbol, now_ms())
             if snap and self.execution in snap.book:
                 self._last_tick_mid = snap.book[self.execution].mid
-            self._had_position = await self.has_open_position(self.focus_symbol)
+            try:
+                self._had_position = await self.has_open_position(self.focus_symbol)
+            except Exception as e:  # keep the last known state; the watchdog retries
+                log.warning("cannot check the position: %s: %s", type(e).__name__, e)
         else:
             self._had_position = False
 
+    async def _sync_closed_trades(self) -> list[dict[str, Any]]:
+        """Journal positions the exchange closed since we last looked — stops, take
+        profits, and anything closed while the agent was not running — and return the
+        latest few for the agent to see."""
+        trades = await self.trading.gateway.closed_trades(CLOSED_TRADES_FETCHED)
+        if self._known_closed is None:
+            self._known_closed = {r["order_id"] for r in self.journal.recent("closed", 1000)}
+        ours = {
+            (r.get("result") or {}).get("id")
+            for r in self.journal.recent("order", 1000)
+            if r.get("action") == "close"
+        }
+        horizon = now_ms() - CLOSED_TRADES_HORIZON_MS
+        summaries = []
+        for t in reversed(trades):  # oldest first, so the journal reads in order
+            by = "agent" if t.order_id in ours else "exchange: stop loss / take profit"
+            if t.order_id not in self._known_closed and t.closed_ms >= horizon:
+                self.journal.write("closed", trade=t, closed_by=by)
+            self._known_closed.add(t.order_id)
+            summaries.append(
+                {
+                    "closed_utc": f"{datetime.fromtimestamp(t.closed_ms / 1000, UTC):%H:%M:%S}",
+                    "symbol": t.symbol,
+                    "side": t.side,
+                    "qty": t.qty,
+                    "entry": t.entry_price,
+                    "exit": t.exit_price,
+                    "pnl_usdt_net_of_fees": round(t.pnl, 2),
+                    "closed_by": by,
+                }
+            )
+        return summaries[::-1][:CLOSED_TRADES_IN_CONTEXT]
+
     async def _situation(self, mode: str, trigger: str) -> str:
         account = await self.trading.account()
+        try:
+            closed = await self._sync_closed_trades()
+        except Exception:
+            log.warning("cannot read closed trades from the exchange", exc_info=True)
+            closed = None
         notes = self.journal.recent("note", self.config.notes_in_context)
         parts = [
             f"Tick {self.tick_no} · {datetime.now(UTC):%Y-%m-%d %H:%M:%S} UTC · mode: {mode}"
@@ -428,6 +490,9 @@ class AgentRuntime:
             "## Account and risk",
             json.dumps(account, ensure_ascii=False),
         ]
+        if closed:
+            parts += ["", "## Recently closed positions (exchange records, newest first)"]
+            parts += [json.dumps(c, ensure_ascii=False) for c in closed]
         if mode == "focus":
             parts += [
                 "",

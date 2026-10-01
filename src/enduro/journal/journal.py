@@ -7,6 +7,7 @@ Every record has `ts` (epoch ms), `kind` and kind-specific fields. Kinds in use:
   tool         — a tool call made by the agent (name, input, result)
   risk         — a risk decision on an open intent
   order        — an order sent and its outcome
+  closed       — a position closed as the exchange books it (net PnL, who closed it)
   note         — the agent's own note at the end of a tick
   focus        — focus set or released, with the reason
   alert        — a price alert set, fired, cancelled or expired

@@ -3,6 +3,11 @@
 The symbol set can be changed at runtime with `set_symbols` (the focus follows whatever
 coin the agent is working): streams restart with the new set and symbols that left it
 are unsubscribed.
+
+A stream can also die silently: after a network drop the socket may stay "open" with no
+data and no error. Order books of the coins we watch change many times a minute, so a
+book stream quiet for `book_stall_s` is treated as dead: the source's connections are
+dropped and the stream is reopened.
 """
 
 from __future__ import annotations
@@ -19,6 +24,13 @@ log = logging.getLogger(__name__)
 
 StreamFactory = Callable[[list[str]], AsyncIterator[MarketEvent]]
 Unsubscribe = Callable[[list[str]], Awaitable[None]]
+Reset = Callable[[], Awaitable[None]]
+
+RESET_TIMEOUT_S = 10.0
+
+
+class StreamStalled(Exception):
+    """No data on a stream for longer than its stall timeout."""
 
 
 class Collector:
@@ -29,6 +41,7 @@ class Collector:
         bus: EventBus,
         book_depth: int = 20,
         max_backoff_s: float = 30.0,
+        book_stall_s: float | None = 60.0,
     ) -> None:
         self._sources = sources
         self._symbols = list(dict.fromkeys(symbols))
@@ -37,6 +50,7 @@ class Collector:
         self._bus = bus
         self._book_depth = book_depth
         self._max_backoff_s = max_backoff_s
+        self._book_stall_s = book_stall_s
 
     @property
     def symbols(self) -> list[str]:
@@ -60,6 +74,7 @@ class Collector:
                             f"{src.exchange}:trades",
                             src.stream_trades,
                             src.unsubscribe_trades,
+                            src.reset_streams,
                         )
                     )
                     tg.create_task(
@@ -69,15 +84,23 @@ class Collector:
                                 symbols, self._book_depth
                             ),
                             src.unsubscribe_order_books,
+                            src.reset_streams,
+                            stall_s=self._book_stall_s,
                         )
                     )
         finally:
             await asyncio.gather(*(src.close() for src in self._sources), return_exceptions=True)
 
     async def _supervise(
-        self, name: str, open_stream: StreamFactory, unsubscribe: Unsubscribe
+        self,
+        name: str,
+        open_stream: StreamFactory,
+        unsubscribe: Unsubscribe,
+        reset: Reset,
+        stall_s: float | None = None,
     ) -> None:
-        """Keep a stream alive: reconnect with backoff on errors, restart on symbol changes."""
+        """Keep a stream alive: reconnect with backoff on errors, reopen it when it goes
+        silent for `stall_s`, restart it on symbol changes."""
         backoff = 1.0
         subscribed: list[str] = []
         while True:
@@ -96,7 +119,14 @@ class Collector:
 
             async def pump_events(stream: AsyncIterator[MarketEvent]) -> None:
                 nonlocal events
-                async for event in stream:
+                while True:
+                    try:
+                        async with asyncio.timeout(stall_s):
+                            event = await anext(stream)
+                    except StopAsyncIteration:
+                        return
+                    except TimeoutError:
+                        raise StreamStalled(f"no data for {stall_s:.0f}s") from None
                     self._bus.publish(event)
                     events += 1
 
@@ -114,8 +144,26 @@ class Collector:
                 log.info("stream %s: symbols changed to %s", name, self._symbols)
                 backoff = 1.0
                 continue
+            if pump.cancelled():
+                # Our own cancellation would have raised above; this is the client library
+                # cancelling its pending reads because the connection was closed (e.g. a
+                # reset triggered by the sibling stream on the same exchange).
+                log.warning("stream %s: connection closed under it, reopening", name)
+                await asyncio.sleep(1.0)
+                continue
             if (error := pump.exception()) is None:
                 log.warning("stream %s ended, restarting", name)
+                continue
+            if isinstance(error, StreamStalled):
+                # The socket may be dead without knowing it: unsubscribing through it could
+                # hang, so drop the connections and start over at once.
+                log.warning("stream %s stalled (%s): reconnecting", name, error)
+                try:
+                    async with asyncio.timeout(RESET_TIMEOUT_S):
+                        await reset()
+                except Exception:
+                    log.warning("stream %s: connection reset failed", name, exc_info=True)
+                backoff = 1.0
                 continue
             if events:  # the stream was healthy before failing: reconnect quickly
                 backoff = 1.0

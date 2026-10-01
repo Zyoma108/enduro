@@ -28,6 +28,10 @@ class MarketDataSource(Protocol):
 
     async def unsubscribe_order_books(self, symbols: Sequence[str]) -> None: ...
 
+    async def reset_streams(self) -> None:
+        """Drop all streaming connections (e.g. one that went silent without an error)."""
+        ...
+
     async def list_linear_usdt_perps(self) -> dict[str, str]:
         """Active USDT-margined perpetuals: unified symbol → asset class ('crypto' | 'tradfi')."""
         ...

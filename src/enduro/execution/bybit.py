@@ -17,6 +17,7 @@ from enduro.data.ccxt_source import is_linear_usdt_perp, with_retries
 from enduro.execution.models import (
     AccountState,
     Balance,
+    ClosedTrade,
     InstrumentRules,
     OrderRequest,
     OrderResult,
@@ -95,6 +96,21 @@ def position_from_ccxt(raw: dict[str, Any]) -> Position | None:
         liquidation_price=opt("liquidationPrice"),
         stop_loss=opt("stopLossPrice"),
         take_profit=opt("takeProfitPrice"),
+    )
+
+
+def closed_trade_from_bybit(raw: dict[str, Any], symbol: str) -> ClosedTrade:
+    """One row of v5 /position/closed-pnl. `side` there is the closing order's side."""
+    return ClosedTrade(
+        order_id=raw["orderId"],
+        symbol=symbol,
+        side="long" if raw["side"] == "Sell" else "short",
+        qty=float(raw["qty"]),
+        entry_price=float(raw["avgEntryPrice"]),
+        exit_price=float(raw["avgExitPrice"]),
+        pnl=float(raw["closedPnl"]),
+        fees=float(raw.get("openFee") or 0) + float(raw.get("closeFee") or 0),
+        closed_ms=int(raw["updatedTime"]),
     )
 
 
@@ -280,6 +296,18 @@ class BybitGateway:
     async def open_orders(self, symbol: str | None = None) -> list[OrderResult]:
         raw = await self._call("open orders", self._client.fetch_open_orders, symbol)
         return [order_from_ccxt(o) for o in raw]
+
+    async def closed_trades(self, limit: int = 10) -> list[ClosedTrade]:
+        await self._call("load markets", self._client.load_markets)
+        raw = await self._call(
+            "closed pnl",
+            self._client.privateGetV5PositionClosedPnl,
+            {"category": "linear", "limit": limit},
+        )
+        return [
+            closed_trade_from_bybit(row, self._client.safe_symbol(row["symbol"], None, "", "swap"))
+            for row in raw["result"]["list"]
+        ]
 
     async def close(self) -> None:
         await self._client.close()

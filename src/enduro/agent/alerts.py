@@ -5,14 +5,23 @@ and then nobody watches the level. An alert keeps that plan alive cheaply: it is
 against each closed 1m candle of the reference exchange (the radar's feed, so any coin in
 the universe works, focused or not) and wakes the agent once when a candle closes beyond
 the level. What to do then is the agent's call — an alert never trades.
+
+Alerts are kept in a small JSON file so they survive agent restarts; expired ones are
+dropped on load.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 from enduro.core.models import MINUTE_MS, Candle
+
+log = logging.getLogger(__name__)
 
 DIRECTIONS = ("above", "below")
 MAX_ALERTS = 10
@@ -58,10 +67,34 @@ class FiredAlert:
 
 
 class AlertBook:
-    def __init__(self, max_alerts: int = MAX_ALERTS) -> None:
+    def __init__(self, max_alerts: int = MAX_ALERTS, path: Path | str | None = None) -> None:
         self.max_alerts = max_alerts
+        self.path = Path(path) if path else None
         self._alerts: dict[int, Alert] = {}
         self._next_id = 1
+        self._load()
+
+    def _load(self) -> None:
+        if self.path is None or not self.path.exists():
+            return
+        try:
+            saved = json.loads(self.path.read_text(encoding="utf-8"))
+            for fields in saved["alerts"]:
+                alert = Alert(**fields)
+                self._alerts[alert.id] = alert
+            self._next_id = max(saved.get("next_id", 1), max(self._alerts, default=0) + 1)
+        except (OSError, ValueError, KeyError, TypeError):
+            log.warning("cannot read saved alerts from %s; starting empty", self.path)
+            self._alerts.clear()
+
+    def _save(self) -> None:
+        if self.path is None:
+            return
+        data = {"next_id": self._next_id, "alerts": [asdict(a) for a in self._alerts.values()]}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.path)
 
     def add(
         self, symbol: str, level: float, direction: str, note: str, ttl_min: int, now_ms: int
@@ -80,16 +113,22 @@ class AlertBook:
         )
         self._alerts[alert.id] = alert
         self._next_id += 1
+        self._save()
         return alert
 
     def cancel(self, alert_id: int) -> Alert | None:
-        return self._alerts.pop(alert_id, None)
+        alert = self._alerts.pop(alert_id, None)
+        if alert is not None:
+            self._save()
+        return alert
 
     def prune(self, now_ms: int) -> list[Alert]:
         """Drop expired alerts and return them."""
         expired = [a for a in self._alerts.values() if a.expires_ms <= now_ms]
         for a in expired:
             del self._alerts[a.id]
+        if expired:
+            self._save()
         return expired
 
     def active(self, now_ms: int) -> list[Alert]:
@@ -111,4 +150,6 @@ class AlertBook:
                     fired.append(FiredAlert(alert, c))
                     del self._alerts[alert.id]
                     break
+        if fired:
+            self._save()
         return fired

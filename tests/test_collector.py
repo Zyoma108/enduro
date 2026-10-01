@@ -33,6 +33,9 @@ class FlakySource:
     async def unsubscribe_order_books(self, symbols):
         pass
 
+    async def reset_streams(self) -> None:
+        pass
+
     async def close(self) -> None:
         self.closed = True
 
@@ -60,6 +63,9 @@ class RecordingSource:
         self.unsubscribed.append(tuple(symbols))
 
     async def unsubscribe_order_books(self, symbols):
+        pass
+
+    async def reset_streams(self) -> None:
         pass
 
     async def close(self) -> None:
@@ -159,3 +165,48 @@ async def test_failed_stream_resets_its_subscription_before_retrying(monkeypatch
     assert event.symbol == "A"
     assert source.opened == [("A",), ("A",)]
     assert source.unsubscribed == [("A",)]  # reset between the failure and the retry
+
+
+class SilentBookSource(RecordingSource):
+    """Book stream sends one snapshot and then goes silent, like a dead socket; trades
+    are cancelled under the reader when the connection is reset (as ccxt does)."""
+
+    exchange = "silent"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.book_opens = 0
+        self.trade_opens = 0
+        self.resets = 0
+        self._pending: asyncio.Future | None = None
+
+    async def stream_order_books(self, symbols, depth):
+        self.book_opens += 1
+        yield OrderBook("silent", symbols[0], 0, 0, bids=((1.0, 1.0),), asks=((2.0, 1.0),))
+        await asyncio.Event().wait()
+
+    async def stream_trades(self, symbols):
+        self.trade_opens += 1
+        self._pending = asyncio.get_running_loop().create_future()
+        await self._pending  # ccxt-style pending read: cancelled by a reset
+        yield  # pragma: no cover
+
+    async def reset_streams(self) -> None:
+        self.resets += 1
+        if self._pending and not self._pending.done():
+            self._pending.cancel()
+
+
+async def test_silent_book_stream_is_reset_and_both_streams_reopen():
+    source = SilentBookSource()
+    collector = Collector([source], ["X"], EventBus(), book_stall_s=0.05)
+    task = asyncio.create_task(collector.run())
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if source.book_opens >= 2 and source.trade_opens >= 2:
+            break
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert source.resets >= 1
+    assert source.book_opens >= 2  # the silent book stream was reopened
+    assert source.trade_opens >= 2  # the sibling stream survived the reset and reopened

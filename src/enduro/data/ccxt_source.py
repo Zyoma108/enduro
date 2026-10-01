@@ -112,6 +112,12 @@ def asset_class(exchange: str, market: dict[str, Any]) -> str:
     return "crypto" if value is None or value in crypto_values else "tradfi"
 
 
+# WebSocket keepalive (ms): ping/pong interval; a connection missing two pongs is failed.
+# ccxt's Binance default is 180 s, so a link silently dropped by the network was only
+# noticed after up to 6 minutes of frozen data (seen live: AAVE book 118 s old, no error).
+WS_KEEPALIVE_MS = 15_000
+
+
 class CcxtSource:
     def __init__(
         self,
@@ -131,6 +137,7 @@ class CcxtSource:
         self._client = client_cls(
             {
                 "enableRateLimit": True,
+                "streaming": {"keepAlive": WS_KEEPALIVE_MS},
                 "options": {
                     "defaultType": market_type,
                     "fetchMarkets": {"types": _MARKET_TYPES[market_type]},
@@ -153,6 +160,10 @@ class CcxtSource:
         while True:
             raw = await self._client.watch_order_book_for_symbols(list(symbols), self._book_limit)
             yield book_from_ccxt(self.exchange, raw, depth, now_ms())
+
+    async def reset_streams(self) -> None:
+        """Drop every WebSocket connection; the next watch call opens fresh ones."""
+        await self._client.close_ws_clients()
 
     async def unsubscribe_trades(self, symbols: Sequence[str]) -> None:
         await self._client.un_watch_trades_for_symbols(list(symbols))

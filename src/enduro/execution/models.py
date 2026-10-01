@@ -103,3 +103,19 @@ class AccountState:
     environment: str  # "demo" | "live"
     margin_mode: str | None  # "cross" | "isolated" | "portfolio"
     hedge_mode: bool | None  # None if it could not be determined
+
+
+@dataclass(frozen=True, slots=True)
+class ClosedTrade:
+    """A position (or part of one) closed, as the exchange books it — whoever closed it:
+    our own close order, the stop loss, the take profit or a liquidation."""
+
+    order_id: str  # the closing order
+    symbol: str
+    side: PositionSide  # the position that was closed
+    qty: float
+    entry_price: float
+    exit_price: float
+    pnl: float  # USDT, net of the opening and closing fees
+    fees: float
+    closed_ms: int
