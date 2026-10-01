@@ -28,6 +28,11 @@ python3 -m venv .venv
 .venv/bin/enduro universe          # список монет, которые сканируем
 .venv/bin/enduro backfill          # загрузить/дополнить 28 дней минутных свечей
 .venv/bin/enduro scan              # обновление раз в минуту (--once, --json, --top N)
+
+# Исполнение (по умолчанию Bybit Demo Trading; ключи — в .env)
+.venv/bin/enduro account           # режим маржи, хедж, баланс, позиции, ордера
+.venv/bin/enduro account --setup   # включить кросс-маржу и режим хеджирования
+.venv/bin/enduro test-trade ETH/USDT:USDT --side long   # только demo
 ```
 
 Настройки — в `config.toml`, секреты — только через переменные окружения / `.env`

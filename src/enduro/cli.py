@@ -15,12 +15,14 @@ from enduro.analytics.baseline import load_baselines
 from enduro.analytics.market_state import MarketState
 from enduro.analytics.radar import LOOKBACK_MINUTES, Radar, RadarRow
 from enduro.config import Settings
-from enduro.core.models import MINUTE_MS, Candle, now_ms
+from enduro.core.models import MINUTE_MS, Candle, OrderBook, now_ms
 from enduro.data.bus import EventBus
 from enduro.data.ccxt_source import CcxtSource
 from enduro.data.collector import Collector
 from enduro.data.history import backfill
 from enduro.data.universe import UniverseEntry, build_universe
+from enduro.execution.bybit import BybitGateway
+from enduro.execution.models import OrderAction, OrderRequest, OrderResult, PositionSide
 from enduro.storage import store
 from enduro.storage.candles import last_candle_ts, load_recent_candles, write_candles
 from enduro.storage.parquet_sink import ParquetSink
@@ -83,6 +85,106 @@ async def _build_universe(
 async def _scan_with_signals(settings: Settings, top: int, as_json: bool, once: bool) -> None:
     _cancel_on_shutdown_signals()
     await _scan(settings, top, as_json, once)
+
+
+def _gateway(settings: Settings) -> BybitGateway:
+    api_key, api_secret = settings.bybit.require()
+    return BybitGateway(
+        api_key,
+        api_secret,
+        environment=settings.execution.environment,
+        allow_live=settings.execution.allow_live,
+    )
+
+
+async def _account(settings: Settings, setup: bool) -> None:
+    gateway = _gateway(settings)
+    try:
+        state = await (gateway.ensure_account_setup() if setup else gateway.account_state())
+        balance = await gateway.balance()
+        positions = await gateway.positions()
+        orders = await gateway.open_orders()
+    finally:
+        await gateway.close()
+    print(f"environment : {state.environment}")
+    print(f"margin mode : {state.margin_mode}")
+    print(f"hedge mode  : {state.hedge_mode}")
+    print(f"equity      : {balance.equity:,.2f} USDT")
+    print(f"available   : {balance.available:,.2f} USDT")
+    print(f"positions   : {len(positions)}")
+    for p in positions:
+        print(
+            f"  {p.symbol:<18} {p.side:<5} size {p.size:g} entry {p.entry_price} "
+            f"mark {p.mark_price} uPnL {p.unrealized_pnl} lev {p.leverage}"
+        )
+    print(f"open orders : {len(orders)}")
+    for o in orders:
+        print(f"  {o.symbol:<18} {o.side:<4} {o.qty:g} @ {o.avg_price} [{o.status}] id={o.id}")
+    if not setup and (state.margin_mode != "cross" or not state.hedge_mode):
+        print("\naccount is not in cross margin + hedge mode; run `enduro account --setup`")
+
+
+async def _test_trade(settings: Settings, symbol: str, side: PositionSide) -> None:
+    """Open the minimum size at market on demo, then close it; report fills vs the book."""
+    if settings.execution.environment != "demo":
+        sys.exit("test-trade only runs against the demo environment")
+    gateway = _gateway(settings)
+    market_data = CcxtSource(settings.market.execution_exchange)  # public mainnet book
+    tag = f"enduro-test-{now_ms()}"
+    started = finished = False
+    try:
+        state = await gateway.account_state()
+        if state.margin_mode != "cross" or not state.hedge_mode:
+            sys.exit("account is not in cross margin + hedge mode; run `enduro account --setup`")
+        if any(p.side == side for p in await gateway.positions([symbol])):
+            sys.exit(f"there is already a {side} position on {symbol}; not touching it")
+        rules = await gateway.instrument_rules(symbol)
+        book = await market_data.fetch_top_of_book(symbol)
+        qty = rules.min_order_qty(book.best_ask or book.best_bid)
+        print(
+            f"{symbol}: qty step {rules.qty_step:g}, min qty {rules.min_qty:g}, "
+            f"min notional {rules.min_notional:g} USDT -> order qty {qty:g}"
+        )
+
+        async def execute(action: OrderAction, book_before: OrderBook) -> OrderResult:
+            request = OrderRequest(symbol, side, action, qty, client_order_id=f"{tag}-{action[0]}")
+            placed = await gateway.place_order(request)
+            order = await gateway.wait_for_fill(placed.id, symbol)
+            touch = book_before.best_ask if request.side == "buy" else book_before.best_bid
+            slip = "—"
+            if order.avg_price and touch:
+                sign = 1 if request.side == "buy" else -1
+                slip = f"{sign * (order.avg_price - touch) / touch * 1e4:+.2f} bps"
+            print(
+                f"{action:<5} {request.side:<4} {order.filled:g}/{order.qty:g} [{order.status}] "
+                f"avg {order.avg_price} | bid {book_before.best_bid} ask {book_before.best_ask} "
+                f"| vs touch {slip} | fee {order.fee}"
+            )
+            return order
+
+        started = True  # from here on, a position on this side is ours to clean up
+        opened = await execute("open", book)
+        for p in await gateway.positions([symbol]):
+            print(f"position: {p.side} {p.size:g} entry {p.entry_price} lev {p.leverage}")
+        closed = await execute("close", await market_data.fetch_top_of_book(symbol))
+        left = [p for p in await gateway.positions([symbol]) if p.side == side]
+        print(f"position after close: {left[0].size:g}" if left else "position after close: flat")
+        finished = not left
+        if opened.avg_price and closed.avg_price:
+            sign = 1 if side == "long" else -1
+            gross = sign * (closed.avg_price - opened.avg_price) * closed.filled
+            fees = (opened.fee or 0.0) + (closed.fee or 0.0)
+            print(f"PnL: gross {gross:+.4f} - fees {fees:.4f} = net {gross - fees:+.4f} USDT")
+    finally:
+        if started and not finished:
+            # We checked the side was flat before starting, so whatever is there is ours.
+            for p in await gateway.positions([symbol]):
+                if p.side == side:
+                    log.error(
+                        "test trade did not finish cleanly, closing %s %s %g", symbol, side, p.size
+                    )
+                    await gateway.place_order(OrderRequest(symbol, side, "close", p.size))
+        await asyncio.gather(gateway.close(), market_data.close())
 
 
 async def _universe(settings: Settings) -> None:
@@ -266,6 +368,17 @@ def main() -> None:
 
     commands.add_parser("universe", help="list symbols the radar scans")
 
+    test_trade = commands.add_parser(
+        "test-trade", help="demo only: open the minimum size at market and close it"
+    )
+    test_trade.add_argument("symbol", help="e.g. BTC/USDT:USDT")
+    test_trade.add_argument("--side", choices=["long", "short"], default="long")
+
+    account = commands.add_parser("account", help="show execution account state")
+    account.add_argument(
+        "--setup", action="store_true", help="switch the account to cross margin + hedge mode"
+    )
+
     fill = commands.add_parser("backfill", help="download/update 1m candle history")
     fill.add_argument("--days", type=int, help="history depth (default: scanner.history_days)")
 
@@ -291,6 +404,10 @@ def main() -> None:
             settings.storage.enabled = False
         with contextlib.suppress(asyncio.CancelledError):
             asyncio.run(_collect(settings, args.interval))
+    elif args.command == "account":
+        asyncio.run(_account(settings, args.setup))
+    elif args.command == "test-trade":
+        asyncio.run(_test_trade(settings, args.symbol, args.side))
     elif args.command == "universe":
         asyncio.run(_universe(settings))
     elif args.command == "backfill":

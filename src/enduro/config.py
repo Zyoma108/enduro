@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -52,6 +52,25 @@ class ScannerConfig(BaseModel):
     taker_fee_bps: float = Field(default=5.5, ge=0)
 
 
+class ExecutionConfig(BaseModel):
+    # "demo" — Bybit Demo Trading (virtual money); "live" — real money.
+    environment: Literal["demo", "live"] = "demo"
+    # Second, independent switch: live trading is refused unless this is true.
+    allow_live: bool = False
+
+
+class ApiCredentials(BaseModel):
+    """Set via env only: ENDURO_BYBIT__API_KEY / ENDURO_BYBIT__API_SECRET."""
+
+    api_key: SecretStr | None = None
+    api_secret: SecretStr | None = None
+
+    def require(self) -> tuple[str, str]:
+        if not self.api_key or not self.api_secret:
+            raise ValueError("API credentials are not set (see .env.example)")
+        return self.api_key.get_secret_value(), self.api_secret.get_secret_value()
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="ENDURO_",
@@ -64,6 +83,8 @@ class Settings(BaseSettings):
     market: MarketConfig = Field(default_factory=MarketConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    bybit: ApiCredentials = Field(default_factory=ApiCredentials)
 
     @classmethod
     def settings_customise_sources(
