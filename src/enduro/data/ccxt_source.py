@@ -158,7 +158,12 @@ class CcxtSource:
         await self._client.un_watch_trades_for_symbols(list(symbols))
 
     async def unsubscribe_order_books(self, symbols: Sequence[str]) -> None:
-        await self._client.un_watch_order_book_for_symbols(list(symbols))
+        # The unsubscribe topic must name the same depth as the subscription (Bybit:
+        # orderbook.<depth>.<symbol>); ccxt otherwise assumes its default (500 on Bybit
+        # linear) and the real subscription stays alive on the server, so the next
+        # subscribe fails with "already subscribed".
+        params = {"limit": self._book_limit} if self._book_limit else {}
+        await self._client.un_watch_order_book_for_symbols(list(symbols), params)
 
     async def list_linear_usdt_perps(self) -> dict[str, str]:
         markets = await with_retries(self._client.load_markets, f"{self.exchange} load_markets")

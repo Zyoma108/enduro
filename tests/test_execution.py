@@ -138,3 +138,20 @@ def test_balance_is_in_usdt_not_usd():
     assert balance.equity == 1010.5  # includes unrealized PnL, in USDT
     assert balance.available == 990.5
     assert balance_from_ccxt({"USDT": {"free": 5.0, "total": 7.0}}).equity == 7.0
+
+
+async def test_unsubscribe_order_books_uses_the_subscribed_depth():
+    from enduro.data.ccxt_source import CcxtSource
+
+    source = CcxtSource("bybit", book_limit=1000)
+    seen = {}
+
+    async def fake_unwatch(symbols, params=None):
+        seen["symbols"], seen["params"] = symbols, params
+
+    source._client.un_watch_order_book_for_symbols = fake_unwatch
+    try:
+        await source.unsubscribe_order_books(["MOVR/USDT:USDT"])
+    finally:
+        await source.close()
+    assert seen == {"symbols": ["MOVR/USDT:USDT"], "params": {"limit": 1000}}

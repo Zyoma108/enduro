@@ -123,6 +123,7 @@ def slippage_bps(levels: Sequence[PriceLevel], mid: float, notional: float) -> f
 
 @dataclass(frozen=True, slots=True)
 class BookStats:
+    age_s: float  # since this snapshot was received; large = the stream is stale
     mid: float
     spread_bps: float
     spread_vs_15m: float  # current spread vs its 15m median
@@ -139,7 +140,10 @@ class BookStats:
 
 
 def book_stats(
-    book: OrderBook, spread_history: Sequence[float], notionals: Sequence[float]
+    book: OrderBook,
+    spread_history: Sequence[float],
+    notionals: Sequence[float],
+    now_ms: int | None = None,
 ) -> BookStats | None:
     mid, spread = book.mid, book.spread_bps
     if mid is None or spread is None:
@@ -154,6 +158,7 @@ def book_stats(
         return depth_within(levels, mid, band) if reach >= band - 1e-6 else None
 
     return BookStats(
+        age_s=max(0.0, ((now_ms if now_ms is not None else book.recv_ts) - book.recv_ts) / 1000),
         mid=mid,
         spread_bps=spread,
         spread_vs_15m=spread / median if median else math.nan,
@@ -250,6 +255,7 @@ class FocusSnapshot:
 
         def book(b: BookStats) -> dict[str, Any]:
             return {
+                "book_age_s": round(b.age_s, 1),
                 "mid": float(f"{b.mid:.8g}"),
                 "spread_bps": r(b.spread_bps),
                 "spread_vs_15m": r(b.spread_vs_15m),
@@ -366,7 +372,7 @@ class FocusTracker:
             }
             if stream.book is not None:
                 stats = book_stats(
-                    stream.book, [s for _, s in stream.spreads], self.slippage_notionals
+                    stream.book, [s for _, s in stream.spreads], self.slippage_notionals, now_ms
                 )
                 if stats is not None:
                     books[ex] = stats

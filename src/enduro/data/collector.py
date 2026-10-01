@@ -120,6 +120,12 @@ class Collector:
             if events:  # the stream was healthy before failing: reconnect quickly
                 backoff = 1.0
             log.error("stream %s failed, retrying in %.0fs", name, backoff, exc_info=error)
+            # Reset the subscription on the exchange side as well: if our view and the
+            # server's diverged (e.g. "already subscribed"), retrying alone loops forever.
+            try:
+                await unsubscribe(symbols)
+            except Exception:
+                log.debug("stream %s: reset unsubscribe failed", name, exc_info=True)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, self._max_backoff_s)
 

@@ -127,3 +127,35 @@ async def test_collector_switches_symbols_at_runtime():
     assert source.opened == [("A", "B"), ("B", "C")]
     assert source.unsubscribed == [("A",)]
     assert collector.symbols == ["B", "C"]
+
+
+class ResubscribeSource(RecordingSource):
+    """The first trade subscription fails as if the server still had a stale one."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_once = True
+
+    async def stream_trades(self, symbols):
+        self.opened.append(tuple(symbols))
+        if self.fail_once:
+            self.fail_once = False
+            raise RuntimeError("already subscribed")
+        for s in symbols:
+            yield Trade("rec", s, 0, 0, price=1.0, amount=1.0, side="buy")
+        await asyncio.Event().wait()
+
+
+async def test_failed_stream_resets_its_subscription_before_retrying(monkeypatch):
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(asyncio, "sleep", lambda _s: real_sleep(0))
+    bus = EventBus()
+    queue = bus.subscribe()
+    source = ResubscribeSource()
+    task = asyncio.create_task(Collector([source], ["A"], bus).run())
+    event = await asyncio.wait_for(queue.get(), timeout=1)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert event.symbol == "A"
+    assert source.opened == [("A",), ("A",)]
+    assert source.unsubscribed == [("A",)]  # reset between the failure and the retry
