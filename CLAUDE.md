@@ -14,6 +14,7 @@ making structural changes — it records the agreed principles and open question
 - Radar / focus: `.venv/bin/enduro universe`, `backfill`, `scan --once`, `focus SYMBOL --json`
 - Execution (demo): `.venv/bin/enduro account` (read-only); `enduro test-trade` places real
   demo orders — ask the user before running it.
+- Journal: `.venv/bin/enduro journal [--day YYYY-MM-DD] [-f] [-a]` (human-readable decisions).
 - Agent: `.venv/bin/enduro agent --dry-run --ticks 2` (no orders, but each tick runs
   `claude -p` on the user's subscription — keep test runs short); without `--dry-run` it trades.
 

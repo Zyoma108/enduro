@@ -8,24 +8,35 @@ Every record has `ts` (epoch ms), `kind` and kind-specific fields. Kinds in use:
   risk         — a risk decision on an open intent
   order        — an order sent and its outcome
   note         — the agent's own note at the end of a tick
+  focus        — focus set or released, with the reason
+  alert        — a price alert set, fired, cancelled or expired
+  feedback     — a tooling gap the agent reported
+  start / stop — an agent session began / ended
   error        — anything that went wrong
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from enduro.core.models import now_ms
 
+log = logging.getLogger(__name__)
+
 
 class Journal:
-    def __init__(self, root: Path | str) -> None:
+    def __init__(
+        self, root: Path | str, echo: Callable[[dict[str, Any]], None] | None = None
+    ) -> None:
         self.root = Path(root)
         self._lock = threading.Lock()
+        self._echo = echo  # e.g. print decisions to the console as they are journaled
 
     def write(self, kind: str, **fields: Any) -> dict[str, Any]:
         record = {"ts": now_ms(), "kind": kind, **fields}
@@ -35,6 +46,11 @@ class Journal:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
+        if self._echo is not None:
+            try:
+                self._echo(json.loads(line))  # the record as it reads back from disk
+            except Exception:
+                log.exception("journal echo failed")
         return record
 
     def read(self, day: str | None = None) -> list[dict[str, Any]]:

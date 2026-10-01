@@ -88,8 +88,18 @@ def false_break_overshoots(
     return overshoots
 
 
-def stop_context(bars: Bars, price: float, side: str, atr_5m: float | None) -> dict:
-    """Everything the agent needs to place a stop for a `side` position at `price`."""
+def stop_context(
+    bars: Bars, price: float, side: str, atr_5m: float | None, price_scale: float = 1.0
+) -> dict:
+    """Everything the agent needs to place a stop for a `side` position at `price`.
+
+    `price` is on the same exchange as `bars`; distances are measured there. Prices in the
+    result are multiplied by `price_scale` — the execution/reference price ratio — so a
+    stop can be set straight from them on the execution exchange."""
+
+    def shown(p: float) -> float:
+        return float(f"{p * price_scale:.8g}")
+
     highs, lows = swing_levels(bars)
     stop_above = side == "short"  # a short's stop is above price, a long's below
     swings = highs if stop_above else lows
@@ -107,14 +117,14 @@ def stop_context(bars: Bars, price: float, side: str, atr_5m: float | None) -> d
     for s in candidates[:3]:
         distance = abs(s.price - price) / price
         level = {
-            "price": s.price,
+            "price": shown(s.price),
             "minutes_ago": len(bars) - 1 - s.index,
             "distance_pct": round(distance * 100, 3),
             "distance_atr_5m": in_atr(distance),
         }
         if typical_sweep is not None:
             beyond = s.price * (1 + typical_sweep if stop_above else 1 - typical_sweep)
-            level["beyond_p90_sweep"] = float(f"{beyond:.8g}")
+            level["beyond_p90_sweep"] = shown(beyond)
             level["beyond_p90_sweep_distance_pct"] = round(abs(beyond - price) / price * 100, 3)
         levels.append(level)
 
@@ -124,7 +134,7 @@ def stop_context(bars: Bars, price: float, side: str, atr_5m: float | None) -> d
     wicks = wick_stats(bars)
     return {
         "side": side,
-        "price": price,
+        "price": shown(price),
         "bars_1m": len(bars),
         "atr_5m_pct": pct(atr_5m),
         "wick_1m_pct": {k: pct(v) for k, v in wicks.items()},

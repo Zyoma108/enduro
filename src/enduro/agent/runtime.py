@@ -7,7 +7,8 @@ focus mode  — live view of one coin; enter, manage, exit, possibly many times 
 Each tick is a fresh episode: the stable system prompt and tools (cached) plus a user
 message with the current state and the agent's recent notes. The agent schedules its
 next check itself; a watchdog wakes it earlier if the price jumps or the position is
-closed by the exchange (stop / take profit hit).
+closed by the exchange (stop / take profit hit), and a price alert the agent left on any
+coin wakes it when a 1m candle closes beyond the level.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from enduro.agent.alerts import AlertBook, FiredAlert
 from enduro.agent.llm import (
     ApiLoopBackend,
     EpisodeBackend,
@@ -121,6 +123,9 @@ class AgentRuntime:
         self._last_tick_mid: float | None = None
         self._last_tick_end_ms = 0
         self._had_position = False
+        self.alerts = AlertBook()
+        self._fired_alerts: list[FiredAlert] = []
+        self._in_tick = False
 
     # ------------------------------------------------------------ views for tools
 
@@ -159,10 +164,28 @@ class AgentRuntime:
         candles = self.radar.radar.candles(symbol, minutes) if self.radar.radar else []
         if len(candles) < 30:
             raise ToolInputError(f"not enough 1m history for {symbol} yet ({len(candles)} bars)")
-        book = self.tracker.latest_book(self.execution, symbol)
-        price = book.mid if book and book.mid else candles[-1].close
-        context = stop_context(Bars.from_candles(candles), price, side, self.atr_5m(symbol))
-        context["source"] = f"{self.reference} 1m candles; price = {self.execution} mid"
+        # Levels come from reference candles; stops trigger on execution prices, which sit
+        # a basis away. Measure on the reference and convert prices by the live basis.
+        ref = self.tracker.latest_book(self.reference, symbol)
+        exe = self.tracker.latest_book(self.execution, symbol)
+        price = ref.mid if ref and ref.mid else candles[-1].close
+        scale = exe.mid / ref.mid if ref and ref.mid and exe and exe.mid else 1.0
+        context = stop_context(
+            Bars.from_candles(candles), price, side, self.atr_5m(symbol), price_scale=scale
+        )
+        if scale != 1.0:
+            context["prices_on"] = self.execution
+            context["basis_bps"] = round((scale - 1) * 1e4, 1)
+            context["source"] = (
+                f"levels from {self.reference} 1m candles, shifted to {self.execution} prices "
+                "by the live basis: set stops from these prices directly"
+            )
+        else:
+            context["prices_on"] = self.reference
+            context["source"] = (
+                f"{self.reference} 1m candles; no live books for the basis yet, so prices are "
+                f"{self.reference} prices — {self.execution} may differ by a few bps"
+            )
         return context
 
     def focus_view(self) -> dict[str, Any]:
@@ -219,7 +242,7 @@ class AgentRuntime:
         await self.radar.refresh()  # the first tick needs a fresh radar
         try:
             async with asyncio.TaskGroup() as tg:
-                tg.create_task(self.radar.run_forever())
+                tg.create_task(self.radar.run_forever(lambda _rows: self._check_alerts()))
                 tg.create_task(self.collector.run())
                 tg.create_task(self._watchdog())
                 tg.create_task(self._ticks(max_ticks))
@@ -230,15 +253,42 @@ class AgentRuntime:
 
     async def _ticks(self, max_ticks: int | None) -> None:
         while max_ticks is None or self.tick_no < max_ticks:
-            await self.tick(self._wake_reason)
+            self._in_tick = True
+            try:
+                await self.tick(self._wake_reason)
+            finally:
+                self._in_tick = False
             self._wake.clear()
             self._wake_reason = "scheduled"
+            self._wake_on_fired_alerts()  # alerts that fired while the tick was running
             timeout = max(0.0, (self._next_check_ms - now_ms()) / 1000)
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout)
             except TimeoutError:
                 pass
         raise _Done  # stops the background tasks too
+
+    def _check_alerts(self) -> None:
+        """After each radar refresh (a new closed 1m candle): fire crossed alerts."""
+        radar = self.radar.radar
+        if radar is None:
+            return
+        now = now_ms()
+        for alert in self.alerts.prune(now):
+            self.journal.write("alert", action="expired", alert=alert)
+        fired = self.alerts.check(lambda symbol: radar.candles(symbol, 5), now)
+        for f in fired:
+            self.journal.write("alert", action="fired", alert=f.alert, close=f.candle.close)
+        self._fired_alerts += fired
+        self._wake_on_fired_alerts()
+
+    def _wake_on_fired_alerts(self) -> None:
+        # A wake-up set during a tick would be cleared when it ends: keep them until then.
+        if not self._fired_alerts or self._in_tick:
+            return
+        self._wake_reason = "; ".join(f.describe() for f in self._fired_alerts)
+        self._fired_alerts = []
+        self._wake.set()
 
     async def _consume_focus_events(self, queue: asyncio.Queue) -> None:
         while True:
@@ -250,7 +300,7 @@ class AgentRuntime:
         while True:
             await asyncio.sleep(2)
             polls += 1
-            if self.focus_symbol is None or self._wake.is_set():
+            if self.focus_symbol is None or self._wake.is_set() or self._in_tick:
                 continue
             gap_s = (
                 self.config.min_wake_gap_position_s
@@ -301,18 +351,24 @@ class AgentRuntime:
             self._next_check_ms = max(
                 self._next_check_ms, now_ms() + self.config.min_check_flat_s * 1000
             )
+        next_check_s = (self._next_check_ms - now_ms()) // 1000
         if self._tick_note:
             self.journal.write(
-                "note", n=self.tick_no, focus=self.focus_symbol, text=self._tick_note
+                "note",
+                n=self.tick_no,
+                focus=self.focus_symbol,
+                text=self._tick_note,
+                next_check_s=next_check_s,
+                session_cost_usd=round(self.session_cost_usd, 4),
             )
-        log.info(
-            "tick %d [%s] next in %ds, session cost $%.3f | %s",
-            self.tick_no,
-            self.focus_symbol or "search",
-            (self._next_check_ms - now_ms()) // 1000,
-            self.session_cost_usd,
-            (self._tick_note or "(no note)").replace("\n", " ")[:300],
-        )
+        else:
+            log.info(
+                "tick %d [%s] ended without a note; next in %ds, session cost $%.3f",
+                self.tick_no,
+                self.focus_symbol or "search",
+                next_check_s,
+                self.session_cost_usd,
+            )
 
     async def _remember_market_state(self) -> None:
         self._last_tick_end_ms = now_ms()
@@ -352,6 +408,11 @@ class AgentRuntime:
             f"[{n.get('focus') or 'search'}] {n['text']}"
             for n in notes
         ] or ["- (none yet)"]
+        alerts = self.alerts.active(now_ms())
+        parts += ["", "## Your price alerts"]
+        parts += [json.dumps(a.to_summary(now_ms()), ensure_ascii=False) for a in alerts] or [
+            "- (none)"
+        ]
         reported = self.journal.recent("feedback", self.config.feedback_in_context)
         if reported:
             parts += ["", "## Tooling gaps you already reported (don't repeat them)"]

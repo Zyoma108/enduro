@@ -13,7 +13,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from enduro.agent.alerts import DEFAULT_TTL_MIN, DIRECTIONS, MAX_TTL_MIN
 from enduro.agent.llm import ToolSpec
+from enduro.core.models import now_ms
 from enduro.risk.manager import OpenIntent
 
 if TYPE_CHECKING:
@@ -192,6 +194,43 @@ async def update_protection(rt: AgentRuntime, args: dict[str, Any]) -> dict[str,
     return await rt.trading.protect(rt.focus_symbol, _side(args), stop, take)
 
 
+async def set_alert(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
+    symbol = str(args.get("symbol") or "")
+    rt.require_known_symbol(symbol)
+    level = _num(args, "level")
+    direction = args.get("direction")
+    if direction not in DIRECTIONS:
+        raise ToolInputError(f"'direction' must be one of {list(DIRECTIONS)}")
+    ttl = int(_num(args, "expires_minutes", required=False) or DEFAULT_TTL_MIN)
+    note = _text(args, "note")
+    candles = rt.radar.radar.candles(symbol, 1) if rt.radar.radar else []
+    last_close = candles[-1].close if candles else None
+    if last_close is None:
+        beyond = False
+    else:
+        beyond = last_close > level if direction == "above" else last_close < level
+    if beyond:
+        raise ToolInputError(
+            f"the last 1m close {last_close:g} is already {direction} {level:g}: "
+            "the alert would fire at once"
+        )
+    try:
+        alert = rt.alerts.add(symbol, level, direction, note, ttl, now_ms())
+    except ValueError as e:
+        raise ToolInputError(str(e)) from None
+    rt.journal.write("alert", action="set", alert=alert)
+    return {"alert": alert.to_summary(now_ms()), "last_1m_close": last_close}
+
+
+async def cancel_alert(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
+    alert_id = int(_num(args, "id") or 0)
+    alert = rt.alerts.cancel(alert_id)
+    if alert is None:
+        raise ToolInputError(f"no active alert #{alert_id}")
+    rt.journal.write("alert", action="cancelled", alert=alert)
+    return {"cancelled": alert_id}
+
+
 FEEDBACK_CATEGORIES = [
     "missing_data",
     "missing_tool",
@@ -350,6 +389,36 @@ TOOLS: list[Tool] = [
             ),
         ),
         update_protection,
+    ),
+    Tool(
+        ToolSpec(
+            "set_alert",
+            "Leave a price alert on any coin of the universe (focused or not): you are woken "
+            "once when a 1m candle on the reference exchange closes above/below the level. "
+            "Use it to keep a plan alive after releasing a coin or while waiting in search "
+            "mode — e.g. 'short if it closes below the range low'. It never trades; on the "
+            f"wake-up you decide. Expires after expires_minutes (default {DEFAULT_TTL_MIN}, "
+            f"max {MAX_TTL_MIN}); active alerts are listed in every check.",
+            _schema(
+                {
+                    "symbol": {"type": "string"},
+                    "level": {"type": "number"},
+                    "direction": {"type": "string", "enum": list(DIRECTIONS)},
+                    "note": {"type": "string"},
+                    "expires_minutes": {"type": "integer", "minimum": 1, "maximum": MAX_TTL_MIN},
+                },
+                ["symbol", "level", "direction", "note"],
+            ),
+        ),
+        set_alert,
+    ),
+    Tool(
+        ToolSpec(
+            "cancel_alert",
+            "Cancel one of your active price alerts by id.",
+            _schema({"id": {"type": "integer"}}, ["id"]),
+        ),
+        cancel_alert,
     ),
     Tool(
         ToolSpec(

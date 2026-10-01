@@ -41,6 +41,7 @@ python3 -m venv .venv
 .venv/bin/enduro agent --dry-run --ticks 3   # решения без отправки ордеров
 .venv/bin/enduro agent                       # торговля на demo
 .venv/bin/enduro feedback                    # чего агенту не хватило (отзывы на инструменты)
+.venv/bin/enduro journal -f                  # журнал по-человечески (--day, -a — всё подряд)
 ```
 
 Настройки — в `config.toml`, секреты — только через переменные окружения / `.env`

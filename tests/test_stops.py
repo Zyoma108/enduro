@@ -91,3 +91,16 @@ def test_stop_context_for_a_long_uses_swing_lows_below():
     assert ctx["nearest_levels_on_stop_side"][0]["price"] == 98
     assert ctx["nearest_levels_on_stop_side"][0]["distance_atr_5m"] is None
     assert "beyond_p90_sweep" not in ctx["nearest_levels_on_stop_side"][0]  # no false breaks yet
+
+
+def test_price_scale_moves_prices_to_the_execution_exchange_but_not_distances():
+    rows = flat(3) + [(100, 102, 99.9, 100)] + flat(5)
+    plain = stops.stop_context(bars(rows), price=100.0, side="short", atr_5m=0.01)
+    shifted = stops.stop_context(
+        bars(rows), price=100.0, side="short", atr_5m=0.01, price_scale=0.999
+    )
+    assert shifted["price"] == pytest.approx(99.9)
+    level = shifted["nearest_levels_on_stop_side"][0]
+    level0 = plain["nearest_levels_on_stop_side"][0]
+    assert level["price"] == pytest.approx(102 * 0.999)
+    assert level["distance_pct"] == level0["distance_pct"]

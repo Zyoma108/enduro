@@ -11,7 +11,7 @@ from enduro.agent.runtime import AgentConfig, AgentRuntime, wake_threshold_bps
 from enduro.agent.tools import TOOLS
 from enduro.analytics.focus import FocusTracker
 from enduro.analytics.liquidity import Liquidity, LiquidityBook, liquidity_from_book
-from enduro.core.models import OrderBook
+from enduro.core.models import Candle, OrderBook
 from enduro.execution.models import Position
 from enduro.journal.journal import Journal
 from enduro.risk.manager import RiskLimits, RiskManager, RiskStateStore
@@ -68,11 +68,22 @@ class FakeRow:
         return {"symbol": self.symbol, "score": self.score}
 
 
+class FakeCandles:
+    """Stands in for the Radar's candle buffer."""
+
+    def __init__(self) -> None:
+        self.by_symbol: dict[str, list[Candle]] = {}
+
+    def candles(self, symbol, minutes):
+        return self.by_symbol.get(symbol, [])[-minutes:]
+
+
 class FakeRadar:
     updated_ms = 1
 
     def __init__(self) -> None:
         self.rows: list = []
+        self.radar = FakeCandles()
         self.liquidity = LiquidityBook(min_depth_usd=2_000, max_spread_bps=10)
 
     async def refresh(self):
@@ -426,3 +437,76 @@ async def test_flat_checks_are_spaced_out_but_positions_are_watched_closely(tmp_
 def test_prompt_states_the_flat_minimum():
     text = render_prompt(Path("prompts/trader.md"), RiskLimits(), 5.5, "demo", min_check_flat_s=150)
     assert "не раньше чем через 150 секунд" in text
+
+
+# ---------------------------------------------------------------- price alerts
+
+
+def candle(symbol: str, minute: int, close: float) -> Candle:
+    ts = 1_790_726_400_000 + minute * 60_000
+    return Candle("binance", symbol, ts, close, close, close, close, 1.0)
+
+
+async def test_alert_is_set_listed_and_wakes_the_agent_once(tmp_path, monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [
+                turn(
+                    call(
+                        "set_alert",
+                        symbol="SOL/USDT:USDT",
+                        level=99.5,
+                        direction="below",
+                        note="short the range break",
+                    )
+                ),
+                turn(call("finish_tick", next_check_seconds=300, note="waiting for the break")),
+            ],
+        ]
+    )
+    rt, _, _, journal = runtime(tmp_path, llm)
+    t0 = 1_790_726_400_000
+    monkeypatch.setattr("enduro.agent.runtime.now_ms", lambda: t0 + 2 * 60_000)
+    monkeypatch.setattr("enduro.agent.tools.now_ms", lambda: t0 + 2 * 60_000)
+    rt.radar.radar.by_symbol["SOL/USDT:USDT"] = [candle("SOL/USDT:USDT", 1, 100.0)]
+    await rt.tick("start")
+    [alert] = rt.alerts.active(t0 + 2 * 60_000)
+    assert (alert.level, alert.direction) == (99.5, "below")
+
+    # the next closed candle is still above: nothing happens
+    rt.radar.radar.by_symbol["SOL/USDT:USDT"].append(candle("SOL/USDT:USDT", 2, 99.8))
+    rt._check_alerts()
+    assert not rt._wake.is_set()
+
+    # a close below the level fires it once and wakes the agent with the reason
+    rt.radar.radar.by_symbol["SOL/USDT:USDT"].append(candle("SOL/USDT:USDT", 3, 99.2))
+    rt._check_alerts()
+    assert rt._wake.is_set()
+    assert "alert #1 SOL/USDT:USDT: 1m close 99.2 below 99.5" in rt._wake_reason
+    assert rt.alerts.active(t0 + 4 * 60_000) == []
+    actions = [r["action"] for r in journal.read("2026-10-01") if r["kind"] == "alert"]
+    assert actions == ["set", "fired"]
+
+
+async def test_alert_fired_during_a_tick_wakes_after_it(tmp_path, monkeypatch):
+    rt, *_ = runtime(tmp_path, ScriptedLLM([]))
+    t0 = 1_790_726_400_000
+    monkeypatch.setattr("enduro.agent.runtime.now_ms", lambda: t0 + 2 * 60_000)
+    rt.alerts.add("SOL/USDT:USDT", 99.5, "below", "x", 60, now_ms=t0)
+    rt.radar.radar.by_symbol["SOL/USDT:USDT"] = [candle("SOL/USDT:USDT", 1, 99.0)]
+    rt._in_tick = True
+    rt._check_alerts()
+    assert not rt._wake.is_set() and len(rt._fired_alerts) == 1
+    rt._in_tick = False
+    rt._wake_on_fired_alerts()
+    assert rt._wake.is_set() and "alert #1" in rt._wake_reason
+
+
+async def test_alert_that_would_fire_at_once_is_rejected(tmp_path):
+    rt, *_ = runtime(tmp_path, ScriptedLLM([]))
+    rt.radar.radar.by_symbol["SOL/USDT:USDT"] = [candle("SOL/USDT:USDT", 1, 100.0)]
+    args = {"symbol": "SOL/USDT:USDT", "level": 101, "direction": "below", "note": "x"}
+    result = await rt.call_tool("set_alert", args)
+    assert result.is_error and "already below" in result.content
+    result = await rt.call_tool("cancel_alert", {"id": 7})
+    assert result.is_error and "no active alert #7" in result.content

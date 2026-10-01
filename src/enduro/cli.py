@@ -351,9 +351,16 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
             claude_bin=agent_cfg.claude_bin,
         )
 
+    from enduro.journal.render import format_record
+
+    def echo(record: dict) -> None:
+        if text := format_record(record):
+            journal_log.info("%s", text)
+
+    journal_log = logging.getLogger("enduro.journal")
     gateway = _gateway(settings)
     risk = _risk_manager(settings)
-    journal = Journal(agent_cfg.journal_dir)
+    journal = Journal(agent_cfg.journal_dir, echo=echo)
     reference = CcxtSource(market.reference_exchange, market_type=market.market_type)
     execution = CcxtSource(market.execution_exchange, market_type=market.market_type)
     stream_sources = [
@@ -439,17 +446,12 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
             environment=settings.execution.environment,
             universe=len(symbols),
         )
-        log.info(
-            "agent started: %s (%s), %s%s",
-            agent_cfg.model,
-            agent_cfg.effort,
-            settings.execution.environment,
-            " DRY RUN" if dry_run else "",
-        )
-        await runtime.run(max_ticks)
-        log.info(
-            "agent stopped after %d ticks, cost $%.3f", runtime.tick_no, runtime.session_cost_usd
-        )
+        try:
+            await runtime.run(max_ticks)
+        finally:
+            journal.write(
+                "stop", ticks=runtime.tick_no, cost_usd=round(runtime.session_cost_usd, 4)
+            )
     finally:
         await asyncio.gather(
             gateway.close(),
@@ -458,6 +460,26 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
             llm.close(),
             return_exceptions=True,
         )
+
+
+def _journal(settings: Settings, day: str | None, follow: bool, verbose: bool) -> None:
+    from enduro.journal.render import day_path, format_line
+    from enduro.journal.render import follow as follow_journal
+
+    root = settings.agent.journal_dir
+    day = day or f"{datetime.now(UTC):%Y-%m-%d}"
+    if follow:
+        with contextlib.suppress(KeyboardInterrupt):
+            for record in follow_journal(root, day):
+                if line := format_line(record, verbose):
+                    print(line, flush=True)
+        return
+    path = day_path(root, day)
+    if not path.exists():
+        sys.exit(f"no journal for {day} ({path})")
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if raw and (line := format_line(json.loads(raw), verbose)):
+            print(line)
 
 
 def _feedback(settings: Settings, days: int) -> None:
@@ -688,6 +710,13 @@ def main() -> None:
     feedback = commands.add_parser("feedback", help="tooling gaps reported by the agent")
     feedback.add_argument("--days", type=int, default=7, help="how many days back")
 
+    journal = commands.add_parser("journal", help="the agent's journal, human-readable")
+    journal.add_argument("--day", help="UTC day YYYY-MM-DD (default: today)")
+    journal.add_argument("-f", "--follow", action="store_true", help="keep printing new records")
+    journal.add_argument(
+        "-a", "--all", action="store_true", help="also every tool call and model call"
+    )
+
     sql = commands.add_parser("sql", help="query recorded data (views: trades, books)")
     sql.add_argument("query", help='e.g. "select exchange, count(*) from trades group by 1"')
 
@@ -726,6 +755,8 @@ def main() -> None:
             asyncio.run(_agent(settings, args.dry_run, args.ticks))
     elif args.command == "feedback":
         _feedback(settings, args.days)
+    elif args.command == "journal":
+        _journal(settings, args.day, args.follow, args.all)
     elif args.command == "sql":
         try:
             store.connect(settings.storage.root).sql(args.query).show(max_rows=100)

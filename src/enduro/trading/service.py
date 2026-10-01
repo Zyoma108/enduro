@@ -140,11 +140,19 @@ class TradingService:
         )
         placed = await self.gateway.place_order(request)
         order = await self.gateway.wait_for_fill(placed.id, symbol)
-        self.journal.write("order", action="close", request=request, result=order, reason=reason)
         pnl = None
         if order.avg_price and position.entry_price:
             sign = 1 if side == "long" else -1
             pnl = sign * (order.avg_price - position.entry_price) * order.filled
+        self.journal.write(
+            "order",
+            action="close",
+            request=request,
+            result=order,
+            reason=reason,
+            entry_price=position.entry_price,
+            gross_pnl_usdt=None if pnl is None else round(pnl, 4),
+        )
         return {
             "closed": order.filled >= position.size,
             "qty": order.filled,
