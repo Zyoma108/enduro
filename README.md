@@ -28,6 +28,7 @@ python3 -m venv .venv
 .venv/bin/enduro universe          # список монет, которые сканируем
 .venv/bin/enduro backfill          # загрузить/дополнить 28 дней минутных свечей
 .venv/bin/enduro scan              # обновление раз в минуту (--once, --json, --top N)
+.venv/bin/enduro focus ETH/USDT:USDT   # поток, стакан, подтверждение Binance (--json)
 
 # Исполнение (по умолчанию Bybit Demo Trading; ключи — в .env)
 .venv/bin/enduro account           # режим маржи, хедж, баланс, позиции, ордера

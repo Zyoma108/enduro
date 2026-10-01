@@ -113,12 +113,21 @@ def asset_class(exchange: str, market: dict[str, Any]) -> str:
 
 
 class CcxtSource:
-    def __init__(self, exchange: str, market_type: str = "swap", **options: Any) -> None:
+    def __init__(
+        self,
+        exchange: str,
+        market_type: str = "swap",
+        book_limit: int | None = None,
+        **options: Any,
+    ) -> None:
+        """`book_limit` — order book depth to subscribe to (exchange-specific valid values,
+        e.g. Bybit 1/50/200/1000; Binance always keeps a full local book)."""
         try:
             client_cls = getattr(ccxtpro, exchange)
         except AttributeError:
             raise ValueError(f"ccxt has no WebSocket support for exchange {exchange!r}") from None
         self.exchange = exchange
+        self._book_limit = book_limit
         self._client = client_cls(
             {
                 "enableRateLimit": True,
@@ -142,7 +151,7 @@ class CcxtSource:
         self, symbols: Sequence[str], depth: int
     ) -> AsyncIterator[OrderBook]:
         while True:
-            raw = await self._client.watch_order_book_for_symbols(list(symbols))
+            raw = await self._client.watch_order_book_for_symbols(list(symbols), self._book_limit)
             yield book_from_ccxt(self.exchange, raw, depth, now_ms())
 
     async def unsubscribe_trades(self, symbols: Sequence[str]) -> None:

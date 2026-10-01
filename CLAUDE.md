@@ -11,7 +11,7 @@ making structural changes — it records the agreed principles and open question
 - Lint/format: `.venv/bin/ruff check . && .venv/bin/ruff format .`
 - Live data smoke test: `.venv/bin/enduro collect --symbols BTC/USDT:USDT --interval 2 --no-record`
 - Query recorded data: `.venv/bin/enduro sql "select count(*) from trades"`
-- Radar: `.venv/bin/enduro universe`, `.venv/bin/enduro backfill`, `.venv/bin/enduro scan --once`
+- Radar / focus: `.venv/bin/enduro universe`, `backfill`, `scan --once`, `focus SYMBOL --json`
 - Execution (demo): `.venv/bin/enduro account` (read-only); `enduro test-trade` places real
   demo orders — ask the user before running it.
 

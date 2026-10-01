@@ -12,6 +12,7 @@ import sys
 from datetime import UTC, datetime
 
 from enduro.analytics.baseline import load_baselines
+from enduro.analytics.focus import WINDOWS_S, FocusSnapshot, FocusTracker
 from enduro.analytics.market_state import MarketState
 from enduro.analytics.radar import LOOKBACK_MINUTES, Radar, RadarRow
 from enduro.config import Settings
@@ -185,6 +186,95 @@ async def _test_trade(settings: Settings, symbol: str, side: PositionSide) -> No
                     )
                     await gateway.place_order(OrderRequest(symbol, side, "close", p.size))
         await asyncio.gather(gateway.close(), market_data.close())
+
+
+FOCUS_BOOK_DEPTH = 1000
+FOCUS_BOOK_LIMITS = {"bybit": 1000}  # Binance keeps a full local book by default
+
+
+async def _focus(settings: Settings, symbols: list[str], interval_s: float, as_json: bool) -> None:
+    _cancel_on_shutdown_signals()
+    market = settings.market
+    exchanges = [market.reference_exchange, market.execution_exchange]
+    bus = EventBus()
+    queue = bus.subscribe()
+    tracker = FocusTracker(market.reference_exchange, market.execution_exchange)
+    # Deep books: depth within ±25 bps and slippage for $50k need hundreds of levels.
+    sources = [
+        CcxtSource(ex, market_type=market.market_type, book_limit=FOCUS_BOOK_LIMITS.get(ex))
+        for ex in exchanges
+    ]
+    collector = Collector(sources, symbols, bus, book_depth=FOCUS_BOOK_DEPTH)
+
+    async def consume() -> None:
+        while True:
+            tracker.on_event(await queue.get())
+
+    async def report() -> None:
+        while True:
+            await asyncio.sleep(interval_s)
+            for symbol in symbols:
+                snap = tracker.snapshot(symbol, now_ms())
+                if snap is None:
+                    continue
+                if as_json:
+                    print(json.dumps(snap.to_summary(), ensure_ascii=False), flush=True)
+                else:
+                    print(_render_focus(snap), flush=True)
+
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(collector.run())
+        tg.create_task(consume())
+        tg.create_task(report())
+
+
+def _render_focus(snap: FocusSnapshot) -> str:
+    def f(x: float | None, fmt: str) -> str:
+        return "—" if x is None or x != x else format(x, fmt)
+
+    stamp = datetime.fromtimestamp(snap.ts / 1000, UTC)
+    lines = [
+        f"=== {snap.symbol} | {stamp:%H:%M:%S} UTC | observed {snap.observed_s:.0f}s"
+        " (* = window only partly observed)"
+    ]
+    lines.append(
+        f"  {'flow':<8}{'win':>4}{'chg':>9}{'notional':>11}{'delta':>7}{'tr/s':>7}"
+        f"{'int_x':>6}{'vs vwap':>9}{'big buy':>10}{'big sell':>10}"
+    )
+    for ex, by_window in snap.flow.items():
+        for name, w in by_window.items():
+            lines.append(
+                f"  {ex:<8}{name + ('*' if w.seconds < WINDOWS_S[name] - 1 else ''):>4}"
+                f"{f(w.price_change * 100, '+.3f'):>8}%"
+                f"{w.notional / 1e3:>10.0f}k{f(w.delta_ratio, '+.2f'):>7}{w.intensity:>7.1f}"
+                f"{f(w.intensity_vs_15m, '.2f'):>6}{f(w.price_vs_vwap_bps, '+.1f'):>8}bp"
+                f"{w.large_buy_notional / 1e3:>9.0f}k{w.large_sell_notional / 1e3:>9.0f}k"
+            )
+    for ex, b in snap.book.items():
+        depth = " ".join(
+            f"±{band}bp {f(bid and bid / 1e3, '.0f')}k/{f(ask and ask / 1e3, '.0f')}k"
+            for band, (bid, ask) in b.depth.items()
+        )
+        slip = " ".join(
+            f"${n / 1e3:g}k {f(buy, '.1f')}/{f(sell, '.1f')}"
+            for n, (buy, sell) in b.slippage.items()
+        )
+        lines.append(
+            f"  book {ex:<8} spread {b.spread_bps:.2f}bp (x{f(b.spread_vs_15m, '.2f')})  "
+            f"seen ±{min(b.visible_bps):.0f}bp  depth bid/ask {depth}  "
+            f"imb {f(b.imbalance(10), '+.2f')}  slip buy/sell bp: {slip}"
+        )
+    c = snap.cross
+    lines.append(
+        f"  cross basis {f(c.basis_bps, '+.2f')}bp (15m mean {f(c.basis_mean_bps, '+.2f')}, "
+        f"std {f(c.basis_std_bps, '.2f')})  {snap.reference} share "
+        + " ".join(f"{w}:{f(v, '.0%')}" for w, v in c.reference_volume_share.items())
+        + "  confirms "
+        + " ".join(
+            f"{w}:{'—' if v is None else ('yes' if v else 'NO')}" for w, v in c.confirms.items()
+        )
+    )
+    return "\n".join(lines)
 
 
 async def _universe(settings: Settings) -> None:
@@ -387,6 +477,11 @@ def main() -> None:
     scan.add_argument("--json", action="store_true", help="print agent-facing JSON")
     scan.add_argument("--once", action="store_true", help="scan once and exit")
 
+    focus = commands.add_parser("focus", help="live microstructure metrics for chosen symbols")
+    focus.add_argument("symbols", nargs="+", help="e.g. ETH/USDT:USDT")
+    focus.add_argument("--interval", type=float, default=10.0, help="report interval, seconds")
+    focus.add_argument("--json", action="store_true", help="print agent-facing JSON")
+
     sql = commands.add_parser("sql", help="query recorded data (views: trades, books)")
     sql.add_argument("query", help='e.g. "select exchange, count(*) from trades group by 1"')
 
@@ -415,6 +510,9 @@ def main() -> None:
     elif args.command == "scan":
         with contextlib.suppress(asyncio.CancelledError):
             asyncio.run(_scan_with_signals(settings, args.top, args.json, args.once))
+    elif args.command == "focus":
+        with contextlib.suppress(asyncio.CancelledError):
+            asyncio.run(_focus(settings, args.symbols, args.interval, args.json))
     elif args.command == "sql":
         try:
             store.connect(settings.storage.root).sql(args.query).show(max_rows=100)
