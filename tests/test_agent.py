@@ -584,6 +584,8 @@ async def test_exchange_closes_are_journaled_once_and_shown_to_the_agent(tmp_pat
     rt, trading, _, journal = runtime(tmp_path, llm)
     trading.gateway = FakeGateway([take_profit, ours, old])  # newest first
     journal.write("order", action="close", result={"id": "c-1"}, reason="thesis broken")
+    # a previous session already journaled the ZRO close: it must not be written again
+    journal.write("closed", trade=ours, closed_by="agent")
 
     await rt.tick("start")
     await rt.tick("scheduled")
@@ -591,9 +593,9 @@ async def test_exchange_closes_are_journaled_once_and_shown_to_the_agent(tmp_pat
     records = journal.read(f"{datetime.now(UTC):%Y-%m-%d}")
     closed = [r for r in records if r["kind"] == "closed"]
     assert [(r["trade"]["symbol"], r["closed_by"]) for r in closed] == [
-        ("ZRO/USDT:USDT", "agent"),
+        ("ZRO/USDT:USDT", "agent"),  # from the previous session
         ("AAVE/USDT:USDT", "exchange: stop loss / take profit"),
-    ]  # once each, oldest first; the 2-day-old close is not journaled late
+    ]  # once each; the 2-day-old close is not journaled late
     situation = next(text for kind, text in llm.log if kind == "user")
     section = situation.split("## Recently closed positions")[1]
     assert section.index("AAVE") < section.index("ZRO")  # newest first

@@ -438,7 +438,9 @@ class AgentRuntime:
         latest few for the agent to see."""
         trades = await self.trading.gateway.closed_trades(CLOSED_TRADES_FETCHED)
         if self._known_closed is None:
-            self._known_closed = {r["order_id"] for r in self.journal.recent("closed", 1000)}
+            self._known_closed = {
+                (r.get("trade") or {}).get("order_id") for r in self.journal.recent("closed", 1000)
+            }
         ours = {
             (r.get("result") or {}).get("id")
             for r in self.journal.recent("order", 1000)
