@@ -54,7 +54,7 @@ def wake_threshold_bps(atr_5m: float | None, in_position: bool, config: AgentCon
 
 
 class _Done(Exception):
-    """Raised by the tick loop to stop all agent tasks after `max_ticks`."""
+    """Raised by the tick loop to stop all agent tasks when the session is over."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +126,8 @@ class AgentRuntime:
         self.alerts = AlertBook()
         self._fired_alerts: list[FiredAlert] = []
         self._in_tick = False
+        # Tick limit reached with a position open: keep managing it, no new entries.
+        self.wind_down = False
 
     # ------------------------------------------------------------ views for tools
 
@@ -252,7 +254,7 @@ class AgentRuntime:
             pass
 
     async def _ticks(self, max_ticks: int | None) -> None:
-        while max_ticks is None or self.tick_no < max_ticks:
+        while True:
             self._in_tick = True
             try:
                 await self.tick(self._wake_reason)
@@ -261,12 +263,38 @@ class AgentRuntime:
             self._wake.clear()
             self._wake_reason = "scheduled"
             self._wake_on_fired_alerts()  # alerts that fired while the tick was running
+            if await self._session_over(max_ticks):
+                break
             timeout = max(0.0, (self._next_check_ms - now_ms()) / 1000)
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout)
             except TimeoutError:
                 pass
+            if self.wind_down and await self._session_over(max_ticks):
+                break  # the exchange closed the position (stop / take profit) meanwhile
         raise _Done  # stops the background tasks too
+
+    async def _session_over(self, max_ticks: int | None) -> bool:
+        """After `max_ticks` the session ends — but never with a position left unmanaged:
+        until it is closed the agent keeps ticking, only to manage it."""
+        if max_ticks is None or self.tick_no < max_ticks:
+            return False
+        try:
+            positions = (await self.trading.account())["positions"]
+        except Exception:
+            log.exception("cannot check positions at the tick limit; continuing")
+            return False
+        if not positions:
+            return True
+        if not self.wind_down:
+            self.wind_down = True
+            held = ", ".join(f"{p['symbol']} {p['side']}" for p in positions)
+            self.journal.write(
+                "session",
+                text=f"tick limit {max_ticks} reached with an open position ({held}): "
+                "managing it until it is closed, no new entries",
+            )
+        return False
 
     def _check_alerts(self) -> None:
         """After each radar refresh (a new closed 1m candle): fire crossed alerts."""
@@ -387,6 +415,16 @@ class AgentRuntime:
             f"Tick {self.tick_no} · {datetime.now(UTC):%Y-%m-%d %H:%M:%S} UTC · mode: {mode}"
             f" · trigger: {trigger}",
             "",
+        ]
+        if self.wind_down:
+            parts += [
+                "## Session ending",
+                "The session's tick limit is reached. Manage the open position to its end "
+                "(stop, take profit or your exit) as usual; no new entries. The session "
+                "stops once you are flat.",
+                "",
+            ]
+        parts += [
             "## Account and risk",
             json.dumps(account, ensure_ascii=False),
         ]

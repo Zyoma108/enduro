@@ -1,6 +1,7 @@
 import asyncio
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -510,3 +511,50 @@ async def test_alert_that_would_fire_at_once_is_rejected(tmp_path):
     assert result.is_error and "already below" in result.content
     result = await rt.call_tool("cancel_alert", {"id": 7})
     assert result.is_error and "no active alert #7" in result.content
+
+
+# ---------------------------------------------------------------- session end
+
+
+async def test_session_ends_right_after_the_last_tick(tmp_path):
+    llm = ScriptedLLM([[turn(call("finish_tick", next_check_seconds=600, note="flat"))]])
+    rt, *_ = runtime(tmp_path, llm)
+    with pytest.raises(Exception) as info:  # _Done, not a 600 s wait
+        await asyncio.wait_for(rt._ticks(1), 2)
+    assert type(info.value).__name__ == "_Done"
+    assert not rt.wind_down
+
+
+async def test_tick_limit_with_open_position_keeps_managing_until_flat(tmp_path):
+    llm = ScriptedLLM(
+        [
+            [turn(call("finish_tick", next_check_seconds=15, note="holding"))],
+            [  # overtime: a new entry is refused, managing goes on
+                turn(call("open_position", side="short", stop_loss=130, thesis="flip")),
+                turn(call("finish_tick", next_check_seconds=15, note="closing soon")),
+            ],
+        ]
+    )
+    rt, trading, _, journal = runtime(tmp_path, llm)
+    rt.focus_symbol = "SOL/USDT:USDT"
+    trading.positions = [{"symbol": "SOL/USDT:USDT", "side": "long"}]
+    original_tick = rt.tick
+
+    async def tick(trigger):
+        await original_tick(trigger)
+        rt._next_check_ms = 0  # don't really wait between ticks
+        if rt.tick_no == 2:
+            trading.positions.clear()  # the agent closed it
+
+    rt.tick = tick
+    with pytest.raises(Exception) as info:
+        await asyncio.wait_for(rt._ticks(1), 2)
+    assert type(info.value).__name__ == "_Done"
+    assert rt.tick_no == 2 and rt.wind_down
+    assert trading.opened == []
+    records = journal.read(f"{datetime.now(UTC):%Y-%m-%d}")
+    refused = [r for r in records if r["kind"] == "tool" and r["name"] == "open_position"]
+    assert "session is ending" in refused[0]["error"]
+    assert any(r["kind"] == "session" for r in records)
+    situation = next(text for kind, text in llm.log if kind == "user" and "Tick 2" in text)
+    assert "## Session ending" in situation

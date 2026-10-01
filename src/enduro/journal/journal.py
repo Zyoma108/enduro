@@ -12,6 +12,7 @@ Every record has `ts` (epoch ms), `kind` and kind-specific fields. Kinds in use:
   alert        — a price alert set, fired, cancelled or expired
   feedback     — a tooling gap the agent reported
   start / stop — an agent session began / ended
+  session      — session-level events (e.g. tick limit reached with a position open)
   error        — anything that went wrong
 """
 

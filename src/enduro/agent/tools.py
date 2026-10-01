@@ -160,6 +160,11 @@ async def get_account(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
 async def open_position(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
     if rt.focus_symbol is None:
         raise ToolInputError("trades are only allowed on the focus symbol; set_focus first")
+    if rt.wind_down:
+        raise ToolInputError(
+            "the session is ending (tick limit reached): no new entries, only manage the "
+            "open position"
+        )
     risk_pct = _num(args, "risk_pct", required=False)
     intent = OpenIntent(
         symbol=rt.focus_symbol,

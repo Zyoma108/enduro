@@ -104,6 +104,8 @@ def format_record(r: dict[str, Any], verbose: bool = False) -> str | None:
             f"START {r.get('backend')} · {r.get('model')} ({r.get('effort')}) · "
             f"{r.get('environment')}{dry} · universe {r.get('universe')}"
         )
+    if kind == "session":
+        return f"SESSION {r.get('text')}"
     if kind == "stop":
         return f"STOP after {r.get('ticks')} ticks · session cost ${r.get('cost_usd', 0):.3f}"
     if kind == "tick":
