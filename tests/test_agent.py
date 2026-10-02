@@ -485,7 +485,8 @@ async def test_alert_is_set_listed_and_wakes_the_agent_once(tmp_path, monkeypatc
     assert rt._wake.is_set()
     assert "alert #1 SOL/USDT:USDT: 1m close 99.2 below 99.5" in rt._wake_reason
     assert rt.alerts.active(t0 + 4 * 60_000) == []
-    actions = [r["action"] for r in journal.read("2026-10-01") if r["kind"] == "alert"]
+    records = journal.read(f"{datetime.now(UTC):%Y-%m-%d}")
+    actions = [r["action"] for r in records if r["kind"] == "alert"]
     assert actions == ["set", "fired"]
 
 

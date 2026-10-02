@@ -77,7 +77,7 @@ def flow_stats(
         delta_ratio=(buys - sells) / (buys + sells) if buys + sells else 0.0,
         intensity=intensity,
         intensity_vs_15m=intensity / rate_15m if rate_15m else math.nan,
-        price_change=window[-1].price / window[0].price - 1 if window else 0.0,
+        price_change=window[-1].price / window[0].price - 1 if window and window[0].price else 0.0,
         vwap=vwap,
         price_vs_vwap_bps=(last / vwap - 1) * 1e4 if vwap and last else None,
         large_buy_notional=sum(t.notional for t in large if t.side == "buy"),
@@ -324,6 +324,8 @@ class FocusTracker:
             stream.first_seen = event.recv_ts
         cutoff = event.recv_ts - HISTORY_MS
         if isinstance(event, Trade):
+            if not (event.price > 0 and event.amount > 0):
+                return  # malformed print (seen live: a zero-price 1000PEPE trade)
             stream.trades.append(event)
             while stream.trades and stream.trades[0].ts < cutoff:
                 stream.trades.popleft()

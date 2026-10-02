@@ -393,7 +393,11 @@ class AgentRuntime:
         )
         if not self._next_check_ms:
             self._next_check_ms = now_ms() + default_s * 1000
-        await self._remember_market_state()
+        try:
+            await self._remember_market_state()
+        except Exception as e:  # never let bookkeeping after the episode kill the agent
+            log.error("tick %d: market state: %s: %s", self.tick_no, type(e).__name__, e)
+            self.journal.write("error", what="market state", error=f"{type(e).__name__}: {e}")
         if not self._had_position:
             # Flat: scheduled checks are spaced out to save model usage; a sharp move
             # still wakes the agent through the watchdog.

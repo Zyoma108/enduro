@@ -159,3 +159,16 @@ def test_windows_do_not_extend_before_observation_start():
     flow = snap.to_summary()["flow"]["binance"]
     assert list(flow) == ["1m"]  # 5m and 15m would repeat the same 30 s
     assert flow["1m"]["partial_window_s"] == 30
+
+
+def test_zero_price_trades_are_ignored():
+    from enduro.analytics.focus import FocusTracker
+    from enduro.core.models import Trade
+
+    tracker = FocusTracker("binance", "bybit")
+    t0 = 1_790_726_400_000
+    tracker.on_event(Trade("binance", "X", t0, t0, price=0.0, amount=5.0, side="buy"))
+    tracker.on_event(Trade("binance", "X", t0 + 1, t0 + 1, price=1.0, amount=5.0, side="buy"))
+    tracker.on_event(Trade("binance", "X", t0 + 2, t0 + 2, price=1.1, amount=5.0, side="sell"))
+    snap = tracker.snapshot("X", t0 + 3)  # used to raise ZeroDivisionError
+    assert snap is not None
