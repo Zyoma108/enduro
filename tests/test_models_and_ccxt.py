@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from enduro.core.models import OrderBook
@@ -57,12 +59,13 @@ def test_empty_order_book_metrics():
 class PagedTradesClient:
     """Serves aggregated trades with ids 0..n-1, one per second, newest page by default."""
 
-    def __init__(self, n: int, t0: int) -> None:
-        self.n, self.t0 = n, t0
+    def __init__(self, n: int, t0: int, delay_s: float = 0.0) -> None:
+        self.n, self.t0, self.delay_s = n, t0, delay_s
         self.calls: list[dict] = []
 
     async def fetch_trades(self, symbol, since, limit, params):
         self.calls.append(params)
+        await asyncio.sleep(self.delay_s)
         start = params.get("fromId", max(0, self.n - limit))
         return [
             {
@@ -90,6 +93,18 @@ async def test_aggregated_recent_trades_are_paged_back_to_since():
     assert [t.id for t in trades] == [str(i) for i in range(1201, 3500)]
     assert [c.get("fromId") for c in client.calls] == [None, 1500, 500]
     assert all(c["fetchTradesMethod"] == "fapiPublicGetAggTrades" for c in client.calls)
+
+
+async def test_paging_stops_at_the_time_budget_keeping_the_newest(monkeypatch):
+    from enduro.data import ccxt_source
+    from enduro.data.ccxt_source import CcxtSource
+
+    monkeypatch.setattr(ccxt_source, "RECENT_TRADES_BUDGET_S", 0.05)
+    src = CcxtSource("binance", aggregated_trades=True)
+    await src._client.close()
+    src._client = PagedTradesClient(n=9_000, t0=0, delay_s=0.03)
+    trades = await src.fetch_recent_trades("X", since=0)
+    assert [t.id for t in trades] == [str(i) for i in range(7000, 9000)]  # two pages
 
 
 async def test_raw_recent_trades_are_one_page():

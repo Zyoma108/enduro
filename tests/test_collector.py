@@ -212,7 +212,7 @@ async def test_silent_book_stream_is_reset_and_both_streams_reopen():
     assert source.trade_opens >= 2  # the sibling stream survived the reset and reopened
 
 
-async def test_recent_trades_skips_a_failing_source():
+async def test_recent_trades_skips_failing_and_slow_sources():
     class History(RecordingSource):
         async def fetch_recent_trades(self, symbol, since):
             return [Trade("rec", symbol, since + 1, since + 1, price=1.0, amount=1.0, side="buy")]
@@ -223,6 +223,12 @@ async def test_recent_trades_skips_a_failing_source():
         async def fetch_recent_trades(self, symbol, since):
             raise RuntimeError("down")
 
-    collector = Collector([History(), Broken()], [], EventBus())
-    got = await collector.recent_trades("X", 10)
+    class Slow(RecordingSource):
+        exchange = "slow"
+
+        async def fetch_recent_trades(self, symbol, since):
+            await asyncio.sleep(10)
+
+    collector = Collector([History(), Broken(), Slow()], [], EventBus())
+    got = await collector.recent_trades("X", 10, timeout_s=0.05)
     assert list(got) == ["rec"] and got["rec"][0].ts == 11

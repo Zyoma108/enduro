@@ -65,12 +65,19 @@ class Collector:
             self._version += 1
             self._changed.notify_all()
 
-    async def recent_trades(self, symbol: str, since: int) -> dict[str, list[Trade]]:
+    async def recent_trades(
+        self, symbol: str, since: int, timeout_s: float | None = None
+    ) -> dict[str, list[Trade]]:
         """Recent trades of `symbol` from every source, of the same kind the streams carry
-        (to backfill windows). A source that fails is logged and left out."""
+        (to backfill windows). A source that fails or takes longer than `timeout_s` is
+        logged and left out; the others are kept."""
+
+        async def fetch(src: MarketDataSource) -> list[Trade]:
+            async with asyncio.timeout(timeout_s):
+                return await src.fetch_recent_trades(symbol, since)
+
         results = await asyncio.gather(
-            *(src.fetch_recent_trades(symbol, since) for src in self._sources),
-            return_exceptions=True,
+            *(fetch(src) for src in self._sources), return_exceptions=True
         )
         out: dict[str, list[Trade]] = {}
         for src, result in zip(self._sources, results, strict=True):

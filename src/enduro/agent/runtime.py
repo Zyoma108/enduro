@@ -45,7 +45,7 @@ from enduro.trading.service import TradingService
 log = logging.getLogger(__name__)
 
 RETRY_AFTER_ERROR_S = 30  # a tick that failed (model or exchange down) is retried this soon
-BACKFILL_TIMEOUT_S = 10  # loading recent trades on focus: ~1-5 s normally
+BACKFILL_TIMEOUT_S = 10  # per exchange; paging itself stops after ~5 s
 CLOSED_TRADES_FETCHED = 10
 CLOSED_TRADES_IN_CONTEXT = 5
 CLOSED_TRADES_HORIZON_MS = 24 * 3_600_000  # older closes are not journaled late
@@ -241,12 +241,9 @@ class AgentRuntime:
     async def _backfill_focus(self, symbol: str) -> None:
         """Load the last minutes of trades so the agent sees the flow at once instead of
         a few seconds of it. Best effort: without it the windows just fill up live."""
-        try:
-            async with asyncio.timeout(BACKFILL_TIMEOUT_S):
-                by_exchange = await self.collector.recent_trades(symbol, now_ms() - HISTORY_MS)
-        except TimeoutError:
-            log.warning("backfill of %s timed out; flow windows will fill up live", symbol)
-            return
+        by_exchange = await self.collector.recent_trades(
+            symbol, now_ms() - HISTORY_MS, timeout_s=BACKFILL_TIMEOUT_S
+        )
         if self.focus_symbol != symbol:
             return  # focus moved on meanwhile
         for exchange, trades in by_exchange.items():

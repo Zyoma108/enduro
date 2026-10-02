@@ -96,14 +96,12 @@ class FakeCollector:
         self.symbols: list[str] = []
         self.history: dict[str, list[Trade]] = {}  # exchange -> trades REST would return
         self.history_requests: list[str] = []
-        self.history_delay_s = 0.0
 
     async def set_symbols(self, symbols):
         self.symbols = list(symbols)
 
-    async def recent_trades(self, symbol, since):
+    async def recent_trades(self, symbol, since, timeout_s=None):
         self.history_requests.append(symbol)
-        await asyncio.sleep(self.history_delay_s)
         return {
             ex: [t for t in trades if t.symbol == symbol] for ex, trades in self.history.items()
         }
@@ -677,12 +675,3 @@ async def test_focus_is_backfilled_with_recent_trades(tmp_path):
 
     await rt.set_focus("SOL/USDT:USDT", "same coin again")
     assert collector.history_requests == ["SOL/USDT:USDT"]  # no second load
-
-
-async def test_slow_backfill_does_not_block_focus(tmp_path, monkeypatch):
-    monkeypatch.setattr("enduro.agent.runtime.BACKFILL_TIMEOUT_S", 0.01)
-    rt, _, collector, _ = runtime(tmp_path, ScriptedLLM([]))
-    collector.history_delay_s = 1.0
-    await rt.set_focus("SOL/USDT:USDT", "test")
-    assert rt.focus_symbol == "SOL/USDT:USDT"
-    assert rt.focus_view()["status"] == "waiting for the first live data"

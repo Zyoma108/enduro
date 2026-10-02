@@ -119,6 +119,10 @@ WS_KEEPALIVE_MS = 15_000
 
 RECENT_TRADES_PAGE = 1000  # the most both exchanges return per request
 RECENT_TRADES_MAX_PAGES = 10
+# ccxt spaces Binance aggTrades calls ~1 s apart (request weight 20): a hot coin (~90
+# prints/s) would need 80+ pages for 15 minutes. Stop paging after this long and keep
+# the newest part, which matters most.
+RECENT_TRADES_BUDGET_S = 5.0
 # Without an API key Binance serves older trades only in aggregated form (one print per
 # taker order and price), so a stream that is backfilled must be aggregated as well.
 _RAW_TRADES_METHOD = {
@@ -188,7 +192,7 @@ class CcxtSource:
     async def fetch_recent_trades(self, symbol: str, since: int) -> list[Trade]:
         """Trades after `since`, oldest first. Raw trades: only the latest page (Binance
         ~0.5-1 min of a busy coin, Bybit ~1-5 min). Aggregated: paged back by id until
-        `since` or `RECENT_TRADES_MAX_PAGES`."""
+        `since`, `RECENT_TRADES_MAX_PAGES` or `RECENT_TRADES_BUDGET_S`."""
         params = {"fetchTradesMethod": self._trades_method} if self._trades_method else {}
 
         async def page(extra: dict[str, Any]) -> list[dict[str, Any]]:
@@ -199,10 +203,13 @@ class CcxtSource:
                 f"{self.exchange} fetch_trades {symbol}",
             )
 
+        deadline = asyncio.get_running_loop().time() + RECENT_TRADES_BUDGET_S
         raw = await page({})
         if self._aggregated:
             for _ in range(RECENT_TRADES_MAX_PAGES - 1):
                 if not raw or raw[0]["timestamp"] <= since or int(raw[0]["id"]) == 0:
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
                     break
                 older = await page({"fromId": max(0, int(raw[0]["id"]) - RECENT_TRADES_PAGE)})
                 older = [t for t in older if int(t["id"]) < int(raw[0]["id"])]
