@@ -17,6 +17,7 @@ import logging
 import os
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from enduro.core.models import MINUTE_MS, Candle
@@ -60,9 +61,11 @@ class FiredAlert:
 
     def describe(self) -> str:
         a, c = self.alert, self.candle
+        # The candle may be minutes old (closed while the agent was not running).
+        opened = datetime.fromtimestamp(c.ts / 1000, UTC).strftime("%H:%M")
         return (
-            f"alert #{a.id} {a.symbol}: 1m close {c.close:g} {a.direction} {a.level:g}"
-            f" (your note: {a.note})"
+            f"alert #{a.id} {a.symbol}: 1m candle {opened} UTC closed {c.close:g}"
+            f" {a.direction} {a.level:g} (your note: {a.note})"
         )
 
 

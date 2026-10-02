@@ -491,7 +491,8 @@ async def test_alert_is_set_listed_and_wakes_the_agent_once(tmp_path, monkeypatc
     rt.radar.radar.by_symbol["SOL/USDT:USDT"].append(candle("SOL/USDT:USDT", 3, 99.2))
     rt._check_alerts()
     assert rt._wake.is_set()
-    assert "alert #1 SOL/USDT:USDT: 1m close 99.2 below 99.5" in rt._wake_reason
+    assert "alert #1 SOL/USDT:USDT: 1m candle " in rt._wake_reason
+    assert "UTC closed 99.2 below 99.5" in rt._wake_reason
     assert rt.alerts.active(t0 + 4 * 60_000) == []
     records = journal.read(f"{datetime.now(UTC):%Y-%m-%d}")
     actions = [r["action"] for r in records if r["kind"] == "alert"]
