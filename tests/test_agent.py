@@ -12,7 +12,7 @@ from enduro.agent.runtime import AgentConfig, AgentRuntime, wake_threshold_bps
 from enduro.agent.tools import TOOLS
 from enduro.analytics.focus import FocusTracker
 from enduro.analytics.liquidity import Liquidity, LiquidityBook, liquidity_from_book
-from enduro.core.models import Candle, OrderBook
+from enduro.core.models import Candle, OrderBook, Trade, now_ms
 from enduro.execution.models import Position
 from enduro.journal.journal import Journal
 from enduro.risk.manager import RiskLimits, RiskManager, RiskStateStore
@@ -94,9 +94,19 @@ class FakeRadar:
 class FakeCollector:
     def __init__(self) -> None:
         self.symbols: list[str] = []
+        self.history: dict[str, list[Trade]] = {}  # exchange -> trades REST would return
+        self.history_requests: list[str] = []
+        self.history_delay_s = 0.0
 
     async def set_symbols(self, symbols):
         self.symbols = list(symbols)
+
+    async def recent_trades(self, symbol, since):
+        self.history_requests.append(symbol)
+        await asyncio.sleep(self.history_delay_s)
+        return {
+            ex: [t for t in trades if t.symbol == symbol] for ex, trades in self.history.items()
+        }
 
 
 class FakeTrading:
@@ -647,3 +657,32 @@ async def test_radar_keeps_running_after_a_failed_refresh(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await runner.run_forever(updates.append)
     assert len(calls) == 2 and updates == [[]]  # the failure was survived, the retry updated
+
+
+async def test_focus_is_backfilled_with_recent_trades(tmp_path):
+    rt, _, collector, _ = runtime(tmp_path, ScriptedLLM([]))
+    now = now_ms()
+    collector.history = {
+        "binance": [
+            Trade("binance", "SOL/USDT:USDT", now - i * 1_000, now, 120, 1, "sell", id=str(i))
+            for i in range(600, 0, -1)
+        ],
+        "bybit": [Trade("bybit", "SOL/USDT:USDT", now - 30_000, now, 120, 1, "buy", id="a")],
+    }
+    await rt.set_focus("SOL/USDT:USDT", "test")
+    view = rt.focus_view()
+    assert view["flow"]["binance"]["5m"]["delta_ratio"] == -1.0
+    assert "partial_window_s" not in view["flow"]["binance"]["5m"]
+    assert view["observed_s"] == 30  # what both exchanges cover
+
+    await rt.set_focus("SOL/USDT:USDT", "same coin again")
+    assert collector.history_requests == ["SOL/USDT:USDT"]  # no second load
+
+
+async def test_slow_backfill_does_not_block_focus(tmp_path, monkeypatch):
+    monkeypatch.setattr("enduro.agent.runtime.BACKFILL_TIMEOUT_S", 0.01)
+    rt, _, collector, _ = runtime(tmp_path, ScriptedLLM([]))
+    collector.history_delay_s = 1.0
+    await rt.set_focus("SOL/USDT:USDT", "test")
+    assert rt.focus_symbol == "SOL/USDT:USDT"
+    assert rt.focus_view()["status"] == "waiting for the first live data"

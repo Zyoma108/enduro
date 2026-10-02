@@ -217,14 +217,18 @@ class _Stream:
     book: OrderBook | None = None
     mids: deque[tuple[int, float]] = field(default_factory=deque)  # sampled (recv_ts, mid)
     spreads: deque[tuple[int, float]] = field(default_factory=deque)
-    first_seen: int | None = None
+    first_seen: int | None = None  # trade windows start here (backfill moves it back)
+    # Backfilled trade ids the live stream may deliver again, and the newest such trade.
+    seeded_ids: set[str] = field(default_factory=set)
+    seeded_until: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class FocusSnapshot:
     symbol: str
     ts: int
-    observed_s: float  # how long we have been watching: windows longer than this are partial
+    # Trade history both exchanges cover (live + backfilled): longer windows are partial.
+    observed_s: float
     flow: dict[str, dict[str, FlowStats]]  # exchange -> window -> stats
     book: dict[str, BookStats]  # exchange -> stats
     cross: CrossStats
@@ -326,6 +330,11 @@ class FocusTracker:
         if isinstance(event, Trade):
             if not (event.price > 0 and event.amount > 0):
                 return  # malformed print (seen live: a zero-price 1000PEPE trade)
+            if stream.seeded_ids:
+                if event.ts <= stream.seeded_until and event.id in stream.seeded_ids:
+                    return  # already backfilled
+                if event.ts > stream.seeded_until:
+                    stream.seeded_ids.clear()  # live is past the backfill
             stream.trades.append(event)
             while stream.trades and stream.trades[0].ts < cutoff:
                 stream.trades.popleft()
@@ -340,6 +349,36 @@ class FocusTracker:
                 while samples and samples[0][0] < cutoff:
                     samples.popleft()
 
+    def backfill(self, exchange: str, symbol: str, trades: Sequence[Trade]) -> int:
+        """Seed a freshly focused symbol with recent trades fetched over REST, so its flow
+        windows are full right away rather than after 15 minutes of watching. Trades that
+        already arrived live are not duplicated. Returns the number of trades added."""
+        trades = [t for t in trades if t.price > 0 and t.amount > 0]
+        if not trades:
+            return 0
+        stream = self._streams.setdefault((exchange, symbol), _Stream())
+        live_ids = {t.id for t in stream.trades if t.id is not None}
+        first_live = stream.trades[0].ts if stream.trades else None
+        added = [
+            t
+            for t in trades
+            if (
+                t.id not in live_ids
+                if t.id is not None
+                else first_live is None or t.ts < first_live
+            )
+        ]
+        merged = sorted([*added, *stream.trades], key=lambda t: t.ts)
+        cutoff = merged[-1].ts - HISTORY_MS
+        stream.trades = deque(t for t in merged if t.ts >= cutoff)
+        if not stream.trades:
+            return 0
+        start = stream.trades[0].ts
+        stream.first_seen = start if stream.first_seen is None else min(stream.first_seen, start)
+        stream.seeded_ids = {t.id for t in added if t.id is not None}
+        stream.seeded_until = max((t.ts for t in added), default=0)
+        return len(added)
+
     def latest_book(self, exchange: str, symbol: str) -> OrderBook | None:
         stream = self._streams.get((exchange, symbol))
         return stream.book if stream else None
@@ -353,7 +392,8 @@ class FocusTracker:
         streams = {ex: self._streams.get((ex, symbol)) for ex in (self.reference, self.execution)}
         if not any(streams.values()):
             return None
-        first_seen = min(s.first_seen for s in streams.values() if s and s.first_seen)
+        # Each exchange's windows start where its own trade history does.
+        first_seen = max(s.first_seen for s in streams.values() if s and s.first_seen)
 
         flow: dict[str, dict[str, FlowStats]] = {}
         books: dict[str, BookStats] = {}
@@ -361,14 +401,15 @@ class FocusTracker:
             if stream is None:
                 continue
             trades = list(stream.trades)
-            span_15m = min(HISTORY_MS, max(now_ms - first_seen, 1)) / 1000
+            start = stream.first_seen or now_ms
+            span_15m = min(HISTORY_MS, max(now_ms - start, 1)) / 1000
             recent = [t for t in trades if t.ts >= now_ms - HISTORY_MS]
             rate_15m = len(recent) / span_15m
             threshold = large_trade_threshold(recent)
-            # A window cannot start before we started watching, or rates would be diluted.
+            # A window cannot start before the trades we have, or rates would be diluted.
             flow[ex] = {
                 name: flow_stats(
-                    trades, max(now_ms - sec * 1000, first_seen - 1), now_ms, threshold, rate_15m
+                    trades, max(now_ms - sec * 1000, start - 1), now_ms, threshold, rate_15m
                 )
                 for name, sec in WINDOWS_S.items()
             }

@@ -14,12 +14,13 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from enduro.analytics.focus import HISTORY_MS as FOCUS_HISTORY_MS
 from enduro.analytics.focus import WINDOWS_S, FocusSnapshot, FocusTracker
 from enduro.analytics.liquidity import LiquidityBook
 from enduro.analytics.market_state import MarketState
 from enduro.analytics.radar import RadarRow
 from enduro.analytics.radar_runner import RadarRunner
-from enduro.config import Settings
+from enduro.config import MarketConfig, Settings
 from enduro.core.models import OrderBook, now_ms
 from enduro.data.bus import EventBus
 from enduro.data.ccxt_source import CcxtSource
@@ -74,6 +75,7 @@ async def _collect(settings: Settings, interval_s: float) -> None:
     async with asyncio.TaskGroup() as tg:
         tg.create_task(collector.run())
         tg.create_task(consume())
+        tg.create_task(backfill())
         tg.create_task(report())
         if sink is not None:
             tg.create_task(sink.run(bus.subscribe(maxsize=100_000)))
@@ -213,21 +215,38 @@ async def _test_trade(
 
 FOCUS_BOOK_DEPTH = 1000
 FOCUS_BOOK_LIMITS = {"bybit": 1000}  # Binance keeps a full local book by default
+# Binance serves older trades only aggregated, so its focus stream is aggregated too:
+# then a newly focused coin can be backfilled with up to 15 minutes of trades.
+FOCUS_AGGREGATED_TRADES = {"binance"}
+
+
+def _focus_sources(market: MarketConfig) -> list[CcxtSource]:
+    return [
+        CcxtSource(
+            ex,
+            market_type=market.market_type,
+            book_limit=FOCUS_BOOK_LIMITS.get(ex),
+            aggregated_trades=ex in FOCUS_AGGREGATED_TRADES,
+        )
+        for ex in (market.reference_exchange, market.execution_exchange)
+    ]
 
 
 async def _focus(settings: Settings, symbols: list[str], interval_s: float, as_json: bool) -> None:
     _cancel_on_shutdown_signals()
     market = settings.market
-    exchanges = [market.reference_exchange, market.execution_exchange]
     bus = EventBus()
     queue = bus.subscribe()
     tracker = FocusTracker(market.reference_exchange, market.execution_exchange)
     # Deep books: depth within ±25 bps and slippage for $50k need hundreds of levels.
-    sources = [
-        CcxtSource(ex, market_type=market.market_type, book_limit=FOCUS_BOOK_LIMITS.get(ex))
-        for ex in exchanges
-    ]
+    sources = _focus_sources(market)
     collector = Collector(sources, symbols, bus, book_depth=FOCUS_BOOK_DEPTH)
+
+    async def backfill() -> None:
+        for symbol in symbols:
+            by_exchange = await collector.recent_trades(symbol, now_ms() - FOCUS_HISTORY_MS)
+            for exchange, trades in by_exchange.items():
+                tracker.backfill(exchange, symbol, trades)
 
     async def consume() -> None:
         while True:
@@ -248,6 +267,7 @@ async def _focus(settings: Settings, symbols: list[str], interval_s: float, as_j
     async with asyncio.TaskGroup() as tg:
         tg.create_task(collector.run())
         tg.create_task(consume())
+        tg.create_task(backfill())
         tg.create_task(report())
 
 
@@ -365,10 +385,7 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
     journal = Journal(agent_cfg.journal_dir, echo=echo)
     reference = CcxtSource(market.reference_exchange, market_type=market.market_type)
     execution = CcxtSource(market.execution_exchange, market_type=market.market_type)
-    stream_sources = [
-        CcxtSource(ex, market_type=market.market_type, book_limit=FOCUS_BOOK_LIMITS.get(ex))
-        for ex in (market.reference_exchange, market.execution_exchange)
-    ]
+    stream_sources = _focus_sources(market)
     try:
         state = await gateway.account_state()
         if state.margin_mode != "cross" or not state.hedge_mode:

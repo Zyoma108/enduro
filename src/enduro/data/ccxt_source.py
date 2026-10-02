@@ -117,6 +117,19 @@ def asset_class(exchange: str, market: dict[str, Any]) -> str:
 # noticed after up to 6 minutes of frozen data (seen live: AAVE book 118 s old, no error).
 WS_KEEPALIVE_MS = 15_000
 
+RECENT_TRADES_PAGE = 1000  # the most both exchanges return per request
+RECENT_TRADES_MAX_PAGES = 10
+# Without an API key Binance serves older trades only in aggregated form (one print per
+# taker order and price), so a stream that is backfilled must be aggregated as well.
+_RAW_TRADES_METHOD = {
+    ("binance", "swap"): "fapiPublicGetTrades",
+    ("binance", "spot"): "publicGetTrades",
+}
+_AGGREGATED_TRADES_METHOD = {
+    ("binance", "swap"): "fapiPublicGetAggTrades",
+    ("binance", "spot"): "publicGetAggTrades",
+}
+
 
 class CcxtSource:
     def __init__(
@@ -124,14 +137,25 @@ class CcxtSource:
         exchange: str,
         market_type: str = "swap",
         book_limit: int | None = None,
+        aggregated_trades: bool = False,
         **options: Any,
     ) -> None:
         """`book_limit` — order book depth to subscribe to (exchange-specific valid values,
-        e.g. Bybit 1/50/200/1000; Binance always keeps a full local book)."""
+        e.g. Bybit 1/50/200/1000; Binance always keeps a full local book).
+        `aggregated_trades` — stream and fetch aggregated trades (Binance only): needed to
+        backfill more than the last minute of trades."""
         try:
             client_cls = getattr(ccxtpro, exchange)
         except AttributeError:
             raise ValueError(f"ccxt has no WebSocket support for exchange {exchange!r}") from None
+        if aggregated_trades:
+            if (exchange, market_type) not in _AGGREGATED_TRADES_METHOD:
+                raise ValueError(f"no aggregated trades on {exchange} {market_type}")
+            options = {**options, "watchTradesForSymbols": {"name": "aggTrade"}}
+            self._trades_method = _AGGREGATED_TRADES_METHOD[exchange, market_type]
+        else:
+            self._trades_method = _RAW_TRADES_METHOD.get((exchange, market_type))
+        self._aggregated = aggregated_trades
         self.exchange = exchange
         self._book_limit = book_limit
         self._client = client_cls(
@@ -160,6 +184,34 @@ class CcxtSource:
         while True:
             raw = await self._client.watch_order_book_for_symbols(list(symbols), self._book_limit)
             yield book_from_ccxt(self.exchange, raw, depth, now_ms())
+
+    async def fetch_recent_trades(self, symbol: str, since: int) -> list[Trade]:
+        """Trades after `since`, oldest first. Raw trades: only the latest page (Binance
+        ~0.5-1 min of a busy coin, Bybit ~1-5 min). Aggregated: paged back by id until
+        `since` or `RECENT_TRADES_MAX_PAGES`."""
+        params = {"fetchTradesMethod": self._trades_method} if self._trades_method else {}
+
+        async def page(extra: dict[str, Any]) -> list[dict[str, Any]]:
+            return await with_retries(
+                lambda: self._client.fetch_trades(
+                    symbol, None, RECENT_TRADES_PAGE, {**params, **extra}
+                ),
+                f"{self.exchange} fetch_trades {symbol}",
+            )
+
+        raw = await page({})
+        if self._aggregated:
+            for _ in range(RECENT_TRADES_MAX_PAGES - 1):
+                if not raw or raw[0]["timestamp"] <= since or int(raw[0]["id"]) == 0:
+                    break
+                older = await page({"fromId": max(0, int(raw[0]["id"]) - RECENT_TRADES_PAGE)})
+                older = [t for t in older if int(t["id"]) < int(raw[0]["id"])]
+                if not older:
+                    break
+                raw = older + raw
+        recv_ts = now_ms()
+        trades = [trade_from_ccxt(self.exchange, r, recv_ts) for r in raw]
+        return sorted((t for t in trades if t.ts > since), key=lambda t: t.ts)
 
     async def reset_streams(self) -> None:
         """Drop every WebSocket connection; the next watch call opens fresh ones."""

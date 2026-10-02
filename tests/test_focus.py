@@ -172,3 +172,40 @@ def test_zero_price_trades_are_ignored():
     tracker.on_event(Trade("binance", "X", t0 + 2, t0 + 2, price=1.1, amount=5.0, side="sell"))
     snap = tracker.snapshot("X", t0 + 3)  # used to raise ZeroDivisionError
     assert snap is not None
+
+
+def test_backfill_fills_windows_and_skips_trades_seen_twice():
+    tracker = f.FocusTracker("binance", "bybit")
+    now = T0 + 600_000
+    # Focused just now: the live streams have delivered one trade each.
+    tracker.on_event(Trade("binance", "X", now - 1_000, now, 100, 1, "buy", id="599"))
+    tracker.on_event(Trade("bybit", "X", now - 1_000, now - 1_000, 100, 1, "buy", id="y"))
+    # REST: the last 10 minutes, one sell a second, overlapping the live trade.
+    history = [
+        Trade("binance", "X", T0 + i * 1_000, now, 100, 1, "sell", id=str(i)) for i in range(600)
+    ]
+    assert tracker.backfill("binance", "X", history) == 599
+    # The live stream repeats a trade the REST call already returned, then moves on.
+    tracker.on_event(Trade("binance", "X", now - 2_000, now, 100, 1, "sell", id="598"))
+    tracker.on_event(Trade("binance", "X", now - 500, now, 100, 1, "buy", id="600"))
+
+    snap = tracker.snapshot("X", now)
+    five = snap.flow["binance"]["5m"]
+    assert five.seconds == 300 and five.trades == 300  # full window, no duplicate
+    assert snap.flow["binance"]["15m"].seconds == pytest.approx(600.001)
+    # Bybit has only seconds of trades: that is what both exchanges cover.
+    assert snap.observed_s == pytest.approx(1.0)
+    assert snap.flow["bybit"]["5m"].seconds == pytest.approx(1.001)
+    # Past the backfill, live trades are kept even if ids repeat (ids are per exchange).
+    tracker.on_event(Trade("binance", "X", now + 1_000, now, 100, 1, "buy", id="5"))
+    assert tracker.snapshot("X", now + 1_000).flow["binance"]["15m"].trades == 602
+
+
+def test_backfill_keeps_only_the_last_15_minutes_and_ignores_empty_input():
+    tracker = f.FocusTracker("binance", "bybit")
+    assert tracker.backfill("binance", "X", []) == 0
+    assert tracker.snapshot("X", T0) is None
+    old = [trade(T0 + i * 60_000, 100, 1, "buy") for i in range(30)]  # 30 minutes
+    tracker.backfill("binance", "X", old)
+    snap = tracker.snapshot("X", T0 + 29 * 60_000)
+    assert snap.flow["binance"]["15m"].trades == 15

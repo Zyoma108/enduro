@@ -31,7 +31,7 @@ from enduro.agent.llm import (
     ToolResult,
 )
 from enduro.agent.tools import TOOLS, TOOLS_BY_NAME, ToolInputError, to_json
-from enduro.analytics.focus import FocusTracker
+from enduro.analytics.focus import HISTORY_MS, FocusTracker
 from enduro.analytics.metrics import Bars
 from enduro.analytics.radar import RadarRow
 from enduro.analytics.radar_runner import RadarRunner
@@ -45,6 +45,7 @@ from enduro.trading.service import TradingService
 log = logging.getLogger(__name__)
 
 RETRY_AFTER_ERROR_S = 30  # a tick that failed (model or exchange down) is retried this soon
+BACKFILL_TIMEOUT_S = 10  # loading recent trades on focus: ~1-5 s normally
 CLOSED_TRADES_FETCHED = 10
 CLOSED_TRADES_IN_CONTEXT = 5
 CLOSED_TRADES_HORIZON_MS = 24 * 3_600_000  # older closes are not journaled late
@@ -229,10 +230,29 @@ class AgentRuntime:
                     f"close the position on {self.focus_symbol} before switching focus"
                 )
             self.tracker.drop(self.focus_symbol)
+        refocus = self.focus_symbol == symbol
         self.focus_symbol = symbol
         await self.collector.set_symbols([symbol])
         self._last_tick_mid = None
         self.journal.write("focus", symbol=symbol, reason=reason)
+        if not refocus:
+            await self._backfill_focus(symbol)
+
+    async def _backfill_focus(self, symbol: str) -> None:
+        """Load the last minutes of trades so the agent sees the flow at once instead of
+        a few seconds of it. Best effort: without it the windows just fill up live."""
+        try:
+            async with asyncio.timeout(BACKFILL_TIMEOUT_S):
+                by_exchange = await self.collector.recent_trades(symbol, now_ms() - HISTORY_MS)
+        except TimeoutError:
+            log.warning("backfill of %s timed out; flow windows will fill up live", symbol)
+            return
+        if self.focus_symbol != symbol:
+            return  # focus moved on meanwhile
+        for exchange, trades in by_exchange.items():
+            added = self.tracker.backfill(exchange, symbol, trades)
+            span_s = (trades[-1].ts - trades[0].ts) / 1000 if trades else 0
+            log.info("backfilled %s %s: %d trades over %.0fs", exchange, symbol, added, span_s)
 
     async def release_focus(self, reason: str) -> None:
         if self.focus_symbol:

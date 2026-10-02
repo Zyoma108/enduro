@@ -16,7 +16,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
-from enduro.core.models import MarketEvent
+from enduro.core.models import MarketEvent, Trade
 from enduro.data.base import MarketDataSource
 from enduro.data.bus import EventBus
 
@@ -64,6 +64,21 @@ class Collector:
             self._symbols = new
             self._version += 1
             self._changed.notify_all()
+
+    async def recent_trades(self, symbol: str, since: int) -> dict[str, list[Trade]]:
+        """Recent trades of `symbol` from every source, of the same kind the streams carry
+        (to backfill windows). A source that fails is logged and left out."""
+        results = await asyncio.gather(
+            *(src.fetch_recent_trades(symbol, since) for src in self._sources),
+            return_exceptions=True,
+        )
+        out: dict[str, list[Trade]] = {}
+        for src, result in zip(self._sources, results, strict=True):
+            if isinstance(result, BaseException):
+                log.warning("%s: recent trades of %s unavailable: %r", src.exchange, symbol, result)
+            else:
+                out[src.exchange] = result
+        return out
 
     async def run(self) -> None:
         try:
