@@ -577,10 +577,11 @@ class AgentRuntime:
             parts += [
                 "",
                 "## Recently closed positions (exchange records, newest first)",
-                "hindsight (Bybit 1m candles): best/worst_while_open_pct — how far price went "
-                "for/against you while open; after_exit_pct — where price was later, + means "
-                "it kept going your way after you left; if_held — for your own exits, which "
-                "of your stop / take profit price reached first.",
+                "hindsight (минутные свечи Bybit): best/worst_while_open_pct — насколько цена "
+                "уходила в твою пользу и против тебя, пока позиция была открыта; "
+                "after_exit_pct — где цена была потом, + значит она продолжила идти в сторону "
+                "сделки после твоего выхода; if_held — для твоих ручных выходов: что цена "
+                "задела бы раньше, твой стоп или тейк.",
             ]
             parts += [json.dumps(c, ensure_ascii=False) for c in closed]
         if mode == "focus":
@@ -610,7 +611,13 @@ class AgentRuntime:
         if reported:
             parts += ["", "## Tooling gaps you already reported (don't repeat them)"]
             parts += [f"- [{r['category']}] {r['title']}" for r in reported]
-        parts += ["", "Decide what to do now. End the check with finish_tick."]
+        # The journal is read by a Russian-speaking human: without yesterday's notes in
+        # context (after a day off) the model drifted into English (2026-10-04).
+        parts += [
+            "",
+            "Реши, что делать сейчас, и закончи проверку вызовом finish_tick. "
+            "Заметки, тезисы и причины пиши по-русски.",
+        ]
         return "\n".join(parts)
 
     async def _episode(self, situation: str) -> None:
