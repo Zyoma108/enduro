@@ -30,6 +30,7 @@ from enduro.agent.llm import (
     LLMTurn,
     ToolResult,
 )
+from enduro.agent.review import HOLD_CHECK_MIN, TradeContext, review_trade, trade_context
 from enduro.agent.tools import TOOLS, TOOLS_BY_NAME, ToolInputError, to_json
 from enduro.analytics.focus import HISTORY_MS, FocusTracker
 from enduro.analytics.metrics import Bars
@@ -39,6 +40,7 @@ from enduro.analytics.stops import stop_context
 from enduro.core.models import MINUTE_MS, Candle, now_ms
 from enduro.data.base import MarketDataSource
 from enduro.data.collector import Collector
+from enduro.execution.models import ClosedTrade
 from enduro.journal.journal import Journal
 from enduro.trading.service import TradingService
 
@@ -49,6 +51,8 @@ BACKFILL_TIMEOUT_S = 10  # per exchange; paging itself stops after ~5 s
 CLOSED_TRADES_FETCHED = 10
 CLOSED_TRADES_IN_CONTEXT = 5
 CLOSED_TRADES_HORIZON_MS = 24 * 3_600_000  # older closes are not journaled late
+CONTEXT_TEXT_CHARS = 300  # thesis / exit reason quoted back with a closed trade
+HINDSIGHT_REFRESH_MS = 60_000
 
 
 def wake_threshold_bps(atr_5m: float | None, in_position: bool, config: AgentConfig) -> float:
@@ -99,6 +103,7 @@ class AgentRuntime:
         execution: str,
         focus_events: asyncio.Queue | None = None,
         alerts: AlertBook | None = None,
+        execution_source: MarketDataSource | None = None,
     ) -> None:
         # A plain LLM client gets our own tool loop; a backend (e.g. Claude Code) runs its own.
         self.backend: EpisodeBackend = (
@@ -113,6 +118,10 @@ class AgentRuntime:
         self.collector = focus_collector
         self.tracker = focus_tracker
         self.reference_source = reference_source
+        # Prices of the exchange we trade on, for hindsight on closed trades.
+        self.execution_source = execution_source
+        # order id -> (hindsight, final, fetched_ms)
+        self._hindsight: dict[str, tuple[dict[str, Any], bool, int]] = {}
         self.journal = journal
         self.config = config
         self.universe = set(universe)
@@ -462,31 +471,82 @@ class AgentRuntime:
             self._known_closed = {
                 (r.get("trade") or {}).get("order_id") for r in self.journal.recent("closed", 1000)
             }
-        ours = {
-            (r.get("result") or {}).get("id")
-            for r in self.journal.recent("order", 1000)
-            if r.get("action") == "close"
+        orders = self.journal.recent("order", 1000)
+        closes = {
+            (r.get("result") or {}).get("id"): r for r in orders if r.get("action") == "close"
         }
         horizon = now_ms() - CLOSED_TRADES_HORIZON_MS
-        summaries = []
         for t in reversed(trades):  # oldest first, so the journal reads in order
-            by = "agent" if t.order_id in ours else "exchange: stop loss / take profit"
+            by = "agent" if t.order_id in closes else "exchange: stop loss / take profit"
             if t.order_id not in self._known_closed and t.closed_ms >= horizon:
                 self.journal.write("closed", trade=t, closed_by=by)
             self._known_closed.add(t.order_id)
-            summaries.append(
-                {
-                    "closed_utc": f"{datetime.fromtimestamp(t.closed_ms / 1000, UTC):%H:%M:%S}",
-                    "symbol": t.symbol,
-                    "side": t.side,
-                    "qty": t.qty,
-                    "entry": t.entry_price,
-                    "exit": t.exit_price,
-                    "pnl_usdt_net_of_fees": round(t.pnl, 2),
-                    "closed_by": by,
-                }
-            )
-        return summaries[::-1][:CLOSED_TRADES_IN_CONTEXT]
+
+        risks = self.journal.recent("risk", 1000)
+        summaries = []
+        for t in trades[:CLOSED_TRADES_IN_CONTEXT]:  # newest first
+            close = closes.get(t.order_id)
+            summary: dict[str, Any] = {
+                "closed_utc": f"{datetime.fromtimestamp(t.closed_ms / 1000, UTC):%H:%M:%S}",
+                "symbol": t.symbol,
+                "side": t.side,
+                "qty": t.qty,
+                "entry": t.entry_price,
+                "exit": t.exit_price,
+                "pnl_usdt_net_of_fees": round(t.pnl, 2),
+                "closed_by": "agent" if close else "exchange: stop loss / take profit",
+            }
+            context = trade_context(t, orders, risks)
+            if context.thesis:
+                summary["your_thesis"] = context.thesis[:CONTEXT_TEXT_CHARS]
+            if close and close.get("reason"):
+                summary["your_exit_reason"] = close["reason"][:CONTEXT_TEXT_CHARS]
+            if context.stop is not None:
+                summary["stop_at_exit"] = context.stop
+            if context.take is not None:
+                summary["take_profit_at_exit"] = context.take
+            hindsight = await self._trade_hindsight(t, context, by_agent=close is not None)
+            if hindsight is not None:
+                summary["hindsight"] = hindsight
+            summaries.append(summary)
+        return summaries
+
+    async def _trade_hindsight(
+        self, trade: ClosedTrade, context: TradeContext, by_agent: bool
+    ) -> dict[str, Any] | None:
+        """Hindsight from the execution exchange's candles, cached; refreshed at most once
+        a minute until the hour after the exit is complete."""
+        source = self.execution_source or self.reference_source
+        if source is None:
+            return None
+        cached = self._hindsight.get(trade.order_id)
+        now = now_ms()
+        if cached and (cached[1] or now - cached[2] < HINDSIGHT_REFRESH_MS):
+            return cached[0]
+        start = context.opened_ms if context.opened_ms is not None else trade.closed_ms
+        since = start // MINUTE_MS * MINUTE_MS
+        until = min(now, trade.closed_ms + (HOLD_CHECK_MIN + 1) * MINUTE_MS)
+        bars = min(1000, (until - since) // MINUTE_MS + 2)
+        try:
+            candles = await source.fetch_candles(trade.symbol, since, bars)
+        except Exception:
+            log.warning("hindsight for %s unavailable", trade.symbol, exc_info=True)
+            return cached[0] if cached else None
+        closed_bars = [c for c in candles if c.ts + MINUTE_MS <= now]
+        hindsight, final = review_trade(
+            side=trade.side,
+            entry=trade.entry_price,
+            exit_price=trade.exit_price,
+            opened_ms=context.opened_ms,
+            closed_ms=trade.closed_ms,
+            stop=context.stop,
+            take=context.take,
+            by_agent=by_agent,
+            candles=closed_bars,
+            now_ms=now,
+        )
+        self._hindsight[trade.order_id] = (hindsight, final, now)
+        return hindsight
 
     async def _situation(self, mode: str, trigger: str) -> str:
         account = await self.trading.account()
@@ -514,7 +574,14 @@ class AgentRuntime:
             json.dumps(account, ensure_ascii=False),
         ]
         if closed:
-            parts += ["", "## Recently closed positions (exchange records, newest first)"]
+            parts += [
+                "",
+                "## Recently closed positions (exchange records, newest first)",
+                "hindsight (Bybit 1m candles): best/worst_while_open_pct — how far price went "
+                "for/against you while open; after_exit_pct — where price was later, + means "
+                "it kept going your way after you left; if_held — for your own exits, which "
+                "of your stop / take profit price reached first.",
+            ]
             parts += [json.dumps(c, ensure_ascii=False) for c in closed]
         if mode == "focus":
             parts += [

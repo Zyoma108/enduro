@@ -432,6 +432,7 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
             focus_collector=collector,
             focus_tracker=tracker,
             reference_source=reference,
+            execution_source=execution,
             journal=journal,
             config=AgentConfig(
                 search_interval_s=agent_cfg.search_interval_s,

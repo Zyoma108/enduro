@@ -612,6 +612,65 @@ async def test_exchange_closes_are_journaled_once_and_shown_to_the_agent(tmp_pat
     assert '"pnl_usdt_net_of_fees": 9.08' in section
 
 
+async def test_closed_trades_carry_thesis_exit_reason_and_hindsight(tmp_path):
+    from enduro.execution.models import ClosedTrade
+
+    minute = 60_000
+    now = now_ms() // minute * minute
+    opened, closed = now - 10 * minute, now - 8 * minute
+    trade = ClosedTrade("c-9", "SOL/USDT:USDT", "long", 1.0, 100.0, 99.5, -0.6, 0.1, closed)
+
+    class Candles:
+        calls = 0
+
+        async def fetch_candles(self, symbol, since, limit=1000, timeframe="1m"):
+            Candles.calls += 1
+            return [
+                Candle("bybit", symbol, opened, 100, 101, 99.8, 100.5, 1),
+                Candle("bybit", symbol, opened + minute, 100.5, 100.6, 99.4, 99.5, 1),
+                *[
+                    Candle("bybit", symbol, closed + i * minute, 99, 99.2, 97.9, 98, 1)
+                    for i in range(8)
+                ],
+            ]
+
+    llm = ScriptedLLM([[turn(call("finish_tick", next_check_seconds=60, note="n"))] for _ in "ab"])
+    rt, trading, _, journal = runtime(tmp_path, llm)
+    rt.execution_source = Candles()
+    trading.gateway = FakeGateway([trade])
+    journal.write(
+        "risk",
+        intent={"symbol": trade.symbol, "side": "long"},
+        decision={"approved": True},
+        thesis="breakout of 99.9 with buyers",
+    )
+    journal.write(
+        "order",
+        action="open",
+        result={"id": "o-9", "ts": opened},
+        request={
+            "symbol": trade.symbol,
+            "position_side": "long",
+            "stop_loss": 98.0,
+            "take_profit": 103.0,
+        },
+    )
+    journal.write("order", action="close", result={"id": "c-9"}, reason="back under the level")
+
+    await rt.tick("start")
+    await rt.tick("scheduled")
+
+    situation = next(text for kind, text in llm.log if kind == "user")
+    line = next(x for x in situation.splitlines() if x.startswith('{"closed_utc"'))
+    shown = json.loads(line)
+    assert shown["your_thesis"] == "breakout of 99.9 with buyers"
+    assert shown["your_exit_reason"] == "back under the level"
+    assert (shown["stop_at_exit"], shown["take_profit_at_exit"]) == (98.0, 103.0)
+    assert shown["hindsight"]["best_while_open_pct"] == 1.0
+    assert shown["hindsight"]["if_held"] == "stop 98 would have been hit 1 min after your exit"
+    assert Candles.calls == 1  # the second tick reused it (refreshed at most once a minute)
+
+
 # ---------------------------------------------------------------- resilience
 
 
