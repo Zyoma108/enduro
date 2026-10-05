@@ -117,3 +117,59 @@ async def test_raw_recent_trades_are_one_page():
     assert len(trades) == 1000 and client.calls == [{"fetchTradesMethod": "fapiPublicGetTrades"}]
     with pytest.raises(ValueError):
         CcxtSource("bybit", aggregated_trades=True)
+
+
+def test_funding_from_ccxt_reads_interval_from_ccxt_or_the_fallback():
+    from enduro.data.ccxt_source import funding_from_ccxt
+
+    bybit = {
+        "symbol": "X",
+        "timestamp": 5,
+        "fundingRate": -8.5e-05,
+        "fundingTimestamp": 1_000,
+        "interval": "8h",
+    }
+    f = funding_from_ccxt("bybit", bybit, None, 9)
+    assert (f.rate, f.interval_h, f.next_ts, f.ts) == (-8.5e-05, 8.0, 1_000, 5)
+    binance = {
+        "symbol": "X",
+        "timestamp": None,
+        "fundingRate": 0.0001,
+        "fundingTimestamp": 2_000,
+        "interval": None,
+    }
+    f = funding_from_ccxt("binance", binance, 4.0, 9)
+    assert (f.interval_h, f.ts) == (4.0, 9)
+
+
+async def test_binance_funding_interval_comes_from_the_cached_list():
+    from enduro.data.ccxt_source import CcxtSource
+
+    class Client:
+        lists = 0
+
+        def __init__(self):
+            self.has = {"fetchFundingIntervals": True}
+
+        async def fetch_funding_rate(self, symbol):
+            return {
+                "symbol": symbol,
+                "timestamp": 1,
+                "fundingRate": 0.0002,
+                "fundingTimestamp": 2,
+                "interval": None,
+            }
+
+        async def fetch_funding_intervals(self):
+            Client.lists += 1
+            return {"X": {"interval": "4h"}, "Y": {"interval": None}}
+
+        async def close(self):
+            pass
+
+    src = CcxtSource("binance")
+    await src._client.close()
+    src._client = Client()
+    assert (await src.fetch_funding("X")).interval_h == 4.0
+    assert (await src.fetch_funding("Y")).interval_h is None
+    assert Client.lists == 1

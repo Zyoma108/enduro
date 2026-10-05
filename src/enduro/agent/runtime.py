@@ -37,7 +37,7 @@ from enduro.analytics.metrics import Bars
 from enduro.analytics.radar import RadarRow
 from enduro.analytics.radar_runner import RadarRunner
 from enduro.analytics.stops import stop_context
-from enduro.core.models import MINUTE_MS, Candle, now_ms
+from enduro.core.models import MINUTE_MS, Candle, Funding, now_ms
 from enduro.data.base import MarketDataSource
 from enduro.data.collector import Collector
 from enduro.execution.models import ClosedTrade
@@ -53,6 +53,21 @@ CLOSED_TRADES_IN_CONTEXT = 5
 CLOSED_TRADES_HORIZON_MS = 24 * 3_600_000  # older closes are not journaled late
 CONTEXT_TEXT_CHARS = 300  # thesis / exit reason quoted back with a closed trade
 HINDSIGHT_REFRESH_MS = 60_000
+FUNDING_REFRESH_MS = 60_000
+FUNDING_TIMEOUT_S = 5
+FUNDING_NOTE = (
+    "rate_pct — ставка ближайшего расчёта (оценка биржи сейчас), + значит лонги платят "
+    "шортам; платит или получает позиция, открытая на Bybit в момент расчёта (next_in_min)"
+)
+
+
+def funding_summary(f: Funding, now: int) -> dict[str, Any]:
+    out: dict[str, Any] = {"rate_pct": round(f.rate * 100, 4), "interval_h": f.interval_h}
+    if f.interval_h:
+        out["per_day_pct"] = round(f.rate * 100 * 24 / f.interval_h, 4)
+    if f.next_ts:
+        out["next_in_min"] = max(0, round((f.next_ts - now) / MINUTE_MS))
+    return out
 
 
 def wake_threshold_bps(atr_5m: float | None, in_position: bool, config: AgentConfig) -> float:
@@ -120,6 +135,7 @@ class AgentRuntime:
         self.reference_source = reference_source
         # Prices of the exchange we trade on, for hindsight on closed trades.
         self.execution_source = execution_source
+        self._funding_cache: dict[str, tuple[int, dict[str, Any]]] = {}
         # order id -> (hindsight, final, fetched_ms)
         self._hindsight: dict[str, tuple[dict[str, Any], bool, int]] = {}
         self.journal = journal
@@ -207,19 +223,58 @@ class AgentRuntime:
             )
         return context
 
-    def focus_view(self) -> dict[str, Any]:
+    async def focus_view(self) -> dict[str, Any]:
         assert self.focus_symbol is not None
         symbol = self.focus_symbol
         atr = self.atr_5m(symbol)
-        context = {
+        context: dict[str, Any] = {
             # Typical 5-minute range: the noise a stop has to survive.
             "atr_5m_pct": None if atr is None else round(atr * 100, 3),
             **self.radar.liquidity.summary(symbol),
         }
+        if funding := await self._funding(symbol):
+            context["funding"] = funding
         snap = self.tracker.snapshot(symbol, now_ms())
         if snap is None:
             return {"symbol": symbol, "status": "waiting for the first live data", **context}
         return {**snap.to_summary(), **context}
+
+    async def _funding(self, symbol: str) -> dict[str, Any] | None:
+        """Current funding on both exchanges, refreshed at most once a minute. An exchange
+        that does not answer in time is left out."""
+        now = now_ms()
+        cached = self._funding_cache.get(symbol)
+        if cached and now - cached[0] < FUNDING_REFRESH_MS:
+            return cached[1]
+        sources = {
+            ex: src
+            for ex, src in (
+                (self.execution, self.execution_source),
+                (self.reference, self.reference_source),
+            )
+            if src is not None
+        }
+        if not sources:
+            return None
+
+        async def fetch(src: MarketDataSource) -> Funding:
+            async with asyncio.timeout(FUNDING_TIMEOUT_S):
+                return await src.fetch_funding(symbol)
+
+        results = await asyncio.gather(
+            *(fetch(s) for s in sources.values()), return_exceptions=True
+        )
+        view: dict[str, Any] = {}
+        for ex, result in zip(sources, results, strict=True):
+            if isinstance(result, BaseException):
+                log.warning("%s funding of %s unavailable: %r", ex, symbol, result)
+                continue
+            view[ex] = funding_summary(result, now)
+        if not view:
+            return cached[1] if cached else None
+        view["note"] = FUNDING_NOTE
+        self._funding_cache[symbol] = (now, view)
+        return view
 
     async def price_history(self, symbol: str, interval: str, bars: int) -> list[Candle]:
         minutes = {"1m": 1, "5m": 5, "15m": 15, "1h": 60}[interval]
@@ -588,7 +643,7 @@ class AgentRuntime:
             parts += [
                 "",
                 f"## Focus: {self.focus_symbol}",
-                json.dumps(self.focus_view(), ensure_ascii=False),
+                json.dumps(await self.focus_view(), ensure_ascii=False),
             ]
         else:
             parts += [

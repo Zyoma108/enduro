@@ -400,7 +400,7 @@ async def test_radar_view_hides_illiquid_coins_and_focus_shows_atr(tmp_path):
     assert view["rows"][0]["bybit_depth_10bps_usd"] == 50_000
 
     await rt.set_focus("SOL/USDT:USDT", "test")
-    focus = rt.focus_view()
+    focus = await rt.focus_view()
     assert focus["atr_5m_pct"] == 1.2 and focus["tradable"] is True
 
 
@@ -671,6 +671,37 @@ async def test_closed_trades_carry_thesis_exit_reason_and_hindsight(tmp_path):
     assert Candles.calls == 1  # the second tick reused it (refreshed at most once a minute)
 
 
+async def test_focus_shows_funding_from_both_exchanges_and_survives_one_failing(tmp_path):
+    from enduro.core.models import Funding
+
+    class Source:
+        def __init__(self, exchange, rate, interval_h, fail=False):
+            self.exchange, self.rate, self.interval_h, self.fail = exchange, rate, interval_h, fail
+            self.calls = 0
+
+        async def fetch_funding(self, symbol):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("down")
+            next_ts = now_ms() + 90 * 60_000
+            return Funding(self.exchange, symbol, now_ms(), self.rate, self.interval_h, next_ts)
+
+    rt, _, _, _ = runtime(tmp_path, ScriptedLLM([]))
+    rt.execution_source = bybit = Source("bybit", -0.0001, 8.0)
+    rt.reference_source = Source("binance", 0.0003, 4.0, fail=True)
+    await rt.set_focus("SOL/USDT:USDT", "test")
+    funding = (await rt.focus_view())["funding"]
+    assert funding["bybit"] == {
+        "rate_pct": -0.01,
+        "interval_h": 8.0,
+        "per_day_pct": -0.03,
+        "next_in_min": 90,
+    }
+    assert "binance" not in funding and "лонги платят" in funding["note"]
+    await rt.focus_view()
+    assert bybit.calls == 1  # cached for a minute
+
+
 # ---------------------------------------------------------------- resilience
 
 
@@ -728,7 +759,7 @@ async def test_focus_is_backfilled_with_recent_trades(tmp_path):
         "bybit": [Trade("bybit", "SOL/USDT:USDT", now - 30_000, now, 120, 1, "buy", id="a")],
     }
     await rt.set_focus("SOL/USDT:USDT", "test")
-    view = rt.focus_view()
+    view = await rt.focus_view()
     assert view["flow"]["binance"]["5m"]["delta_ratio"] == -1.0
     assert "partial_window_s" not in view["flow"]["binance"]["5m"]
     assert view["observed_s"] == 30  # what both exchanges cover

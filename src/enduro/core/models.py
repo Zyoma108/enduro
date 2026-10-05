@@ -83,6 +83,19 @@ class Candle:
     volume: float  # base currency
 
 
+@dataclass(frozen=True, slots=True)
+class Funding:
+    """Perpetual funding: the rate due at the next settlement, as the exchange estimates
+    it now. Positive means longs pay shorts."""
+
+    exchange: str
+    symbol: str
+    ts: int
+    rate: float  # fraction of position notional per interval
+    interval_h: float | None
+    next_ts: int | None  # next settlement
+
+
 MarketEvent = Trade | OrderBook
 
 MINUTE_MS = 60_000

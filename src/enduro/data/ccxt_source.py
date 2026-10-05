@@ -10,7 +10,7 @@ from typing import Any
 import ccxt
 import ccxt.pro as ccxtpro
 
-from enduro.core.models import Candle, OrderBook, Trade, now_ms
+from enduro.core.models import Candle, Funding, OrderBook, Trade, now_ms
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +72,24 @@ def book_from_ccxt(exchange: str, raw: dict[str, Any], depth: int, recv_ts: int)
     )
 
 
+def funding_from_ccxt(
+    exchange: str, raw: dict[str, Any], interval_h: float | None, recv_ts: int
+) -> Funding:
+    """ccxt reports the next settlement as `fundingTimestamp` (both Binance and Bybit);
+    `interval` only on some exchanges, e.g. "8h"."""
+    interval = raw.get("interval")
+    if isinstance(interval, str) and interval.endswith("h"):
+        interval_h = float(interval[:-1])
+    return Funding(
+        exchange=exchange,
+        symbol=raw["symbol"],
+        ts=raw.get("timestamp") or recv_ts,
+        rate=float(raw["fundingRate"]),
+        interval_h=interval_h,
+        next_ts=raw.get("fundingTimestamp") or raw.get("nextFundingTimestamp"),
+    )
+
+
 def candle_from_ccxt(exchange: str, symbol: str, raw: list) -> Candle:
     ts, o, h, low, c, v = raw[:6]
     return Candle(
@@ -117,6 +135,7 @@ def asset_class(exchange: str, market: dict[str, Any]) -> str:
 # noticed after up to 6 minutes of frozen data (seen live: AAVE book 118 s old, no error).
 WS_KEEPALIVE_MS = 15_000
 
+FUNDING_INTERVALS_TTL_MS = 3_600_000
 RECENT_TRADES_PAGE = 1000  # the most both exchanges return per request
 RECENT_TRADES_MAX_PAGES = 10
 # ccxt spaces Binance aggTrades calls ~1 s apart (request weight 20): a hot coin (~90
@@ -160,6 +179,8 @@ class CcxtSource:
         else:
             self._trades_method = _RAW_TRADES_METHOD.get((exchange, market_type))
         self._aggregated = aggregated_trades
+        self._funding_intervals: dict[str, float] = {}
+        self._funding_intervals_ms = 0
         self.exchange = exchange
         self._book_limit = book_limit
         self._client = client_cls(
@@ -269,6 +290,30 @@ class CcxtSource:
             f"{self.exchange} fetch_ohlcv {symbol}",
         )
         return [candle_from_ccxt(self.exchange, symbol, r) for r in raw]
+
+    async def fetch_funding(self, symbol: str) -> Funding:
+        raw = await with_retries(
+            lambda: self._client.fetch_funding_rate(symbol), f"{self.exchange} funding {symbol}"
+        )
+        interval_h = None if raw.get("interval") else await self._funding_interval_h(symbol)
+        return funding_from_ccxt(self.exchange, raw, interval_h, now_ms())
+
+    async def _funding_interval_h(self, symbol: str) -> float | None:
+        """Funding interval from the exchange's per-symbol list (Binance: 8h for most,
+        4h or 1h for some), reloaded hourly; None if the exchange has no such list."""
+        if not self._client.has.get("fetchFundingIntervals"):
+            return None
+        if now_ms() - self._funding_intervals_ms > FUNDING_INTERVALS_TTL_MS:
+            raw = await with_retries(
+                self._client.fetch_funding_intervals, f"{self.exchange} funding intervals"
+            )
+            self._funding_intervals = {
+                s: float(r["interval"][:-1])
+                for s, r in raw.items()
+                if isinstance(r.get("interval"), str) and r["interval"].endswith("h")
+            }
+            self._funding_intervals_ms = now_ms()
+        return self._funding_intervals.get(symbol)
 
     async def close(self) -> None:
         await self._client.close()

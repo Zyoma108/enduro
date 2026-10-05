@@ -85,7 +85,7 @@ async def get_radar(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
 async def get_focus(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
     if rt.focus_symbol is None:
         raise ToolInputError("no focus symbol; call set_focus first")
-    return rt.focus_view()
+    return await rt.focus_view()
 
 
 async def get_price_history(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
