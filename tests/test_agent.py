@@ -702,6 +702,38 @@ async def test_focus_shows_funding_from_both_exchanges_and_survives_one_failing(
     assert bybit.calls == 1  # cached for a minute
 
 
+async def test_focus_shows_open_interest_next_to_price(tmp_path):
+    from enduro.core.models import OpenInterest
+
+    class Source:
+        def __init__(self, exchange, fail=False):
+            self.exchange, self.fail, self.calls = exchange, fail, 0
+
+        async def fetch_funding(self, symbol):
+            raise RuntimeError("not in this test")
+
+        async def fetch_open_interest(self, symbol, minutes):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("down")
+            now = now_ms() // 60_000 * 60_000
+            return [
+                OpenInterest(self.exchange, symbol, now - m * 60_000, 1000.0 - m)
+                for m in (60, 15, 0)
+            ]
+
+    rt, _, _, _ = runtime(tmp_path, ScriptedLLM([]))
+    rt.execution_source = Source("bybit", fail=True)
+    rt.reference_source = binance = Source("binance")
+    await rt.set_focus("SOL/USDT:USDT", "test")
+    oi = (await rt.focus_view())["open_interest"]
+    assert "bybit" not in oi and "в монетах" in oi["note"]
+    assert oi["binance"]["15m"]["oi_pct"] == round((1000 / 985 - 1) * 100, 2)
+    assert oi["binance"]["1h"]["oi_pct"] == round((1000 / 940 - 1) * 100, 2)
+    await rt.focus_view()
+    assert binance.calls == 1  # cached for a minute
+
+
 # ---------------------------------------------------------------- resilience
 
 

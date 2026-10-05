@@ -173,3 +173,38 @@ async def test_binance_funding_interval_comes_from_the_cached_list():
     assert (await src.fetch_funding("X")).interval_h == 4.0
     assert (await src.fetch_funding("Y")).interval_h is None
     assert Client.lists == 1
+
+
+async def test_open_interest_history_gets_the_live_point_only_when_newer():
+    from enduro.data.ccxt_source import CcxtSource
+
+    class Client:
+        def __init__(self, live_ts):
+            self.live_ts = live_ts
+            self.periods = []
+
+        async def fetch_open_interest_history(self, symbol, timeframe, since, limit):
+            self.periods.append((timeframe, limit))
+            return [
+                {"symbol": symbol, "timestamp": t, "openInterestAmount": 10.0 + t}
+                for t in (300_000, 600_000)
+            ]
+
+        async def fetch_open_interest(self, symbol):
+            if self.live_ts is None:
+                raise RuntimeError("down")
+            return {"symbol": symbol, "timestamp": self.live_ts, "openInterestAmount": 99.0}
+
+        async def close(self):
+            pass
+
+    src = CcxtSource("binance")
+    await src._client.close()
+    src._client = client = Client(live_ts=700_000)
+    points = await src.fetch_open_interest("X", 250)
+    assert [(p.ts, p.amount) for p in points][-1] == (700_000, 99.0)
+    assert client.periods == [("5m", 51)]
+    src._client = Client(live_ts=0)  # an hourly "current" point older than the history
+    assert [p.ts for p in await src.fetch_open_interest("X", 250)] == [300_000, 600_000]
+    src._client = Client(live_ts=None)
+    assert len(await src.fetch_open_interest("X", 250)) == 2

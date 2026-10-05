@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Sequence
 from typing import Protocol
 
-from enduro.core.models import Candle, Funding, OrderBook, Trade
+from enduro.core.models import Candle, Funding, OpenInterest, OrderBook, Trade
 
 
 class MarketDataSource(Protocol):
@@ -51,6 +51,11 @@ class MarketDataSource(Protocol):
 
     async def fetch_funding(self, symbol: str) -> Funding:
         """Current funding of a perpetual (the rate due at the next settlement)."""
+        ...
+
+    async def fetch_open_interest(self, symbol: str, minutes: int) -> list[OpenInterest]:
+        """Open interest over the last `minutes` (5-minute points, plus the live value
+        where the exchange has one), oldest first."""
         ...
 
     async def close(self) -> None: ...

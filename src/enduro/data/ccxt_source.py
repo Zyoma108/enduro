@@ -10,7 +10,7 @@ from typing import Any
 import ccxt
 import ccxt.pro as ccxtpro
 
-from enduro.core.models import Candle, Funding, OrderBook, Trade, now_ms
+from enduro.core.models import Candle, Funding, OpenInterest, OrderBook, Trade, now_ms
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +90,13 @@ def funding_from_ccxt(
     )
 
 
+def open_interest_from_ccxt(exchange: str, raw: dict[str, Any]) -> OpenInterest | None:
+    amount = raw.get("openInterestAmount")
+    if amount is None or raw.get("timestamp") is None:
+        return None
+    return OpenInterest(exchange, raw["symbol"], int(raw["timestamp"]), float(amount))
+
+
 def candle_from_ccxt(exchange: str, symbol: str, raw: list) -> Candle:
     ts, o, h, low, c, v = raw[:6]
     return Candle(
@@ -136,6 +143,7 @@ def asset_class(exchange: str, market: dict[str, Any]) -> str:
 WS_KEEPALIVE_MS = 15_000
 
 FUNDING_INTERVALS_TTL_MS = 3_600_000
+OPEN_INTEREST_STEP_MIN = 5  # finest history resolution both exchanges offer
 RECENT_TRADES_PAGE = 1000  # the most both exchanges return per request
 RECENT_TRADES_MAX_PAGES = 10
 # ccxt spaces Binance aggTrades calls ~1 s apart (request weight 20): a hot coin (~90
@@ -297,6 +305,29 @@ class CcxtSource:
         )
         interval_h = None if raw.get("interval") else await self._funding_interval_h(symbol)
         return funding_from_ccxt(self.exchange, raw, interval_h, now_ms())
+
+    async def fetch_open_interest(self, symbol: str, minutes: int) -> list[OpenInterest]:
+        """History at 5-minute resolution; the newest history point lags a few minutes, so
+        the live value is appended when the exchange reports a newer one (Binance does;
+        ccxt's Bybit "current" value is an hourly point and is skipped)."""
+        step = OPEN_INTEREST_STEP_MIN
+        history = await with_retries(
+            lambda: self._client.fetch_open_interest_history(
+                symbol, f"{step}m", None, minutes // step + 1
+            ),
+            f"{self.exchange} open interest history {symbol}",
+        )
+        out = [p for r in history if (p := open_interest_from_ccxt(self.exchange, r))]
+        try:
+            live = open_interest_from_ccxt(
+                self.exchange, await self._client.fetch_open_interest(symbol)
+            )
+        except Exception as e:  # the history alone is still useful
+            log.debug("%s live open interest of %s unavailable: %r", self.exchange, symbol, e)
+            live = None
+        if live and (not out or live.ts > out[-1].ts):
+            out.append(live)
+        return sorted(out, key=lambda p: p.ts)
 
     async def _funding_interval_h(self, symbol: str) -> float | None:
         """Funding interval from the exchange's per-symbol list (Binance: 8h for most,

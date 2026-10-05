@@ -96,6 +96,17 @@ class Funding:
     next_ts: int | None  # next settlement
 
 
+@dataclass(frozen=True, slots=True)
+class OpenInterest:
+    """Open interest of a perpetual at `ts`, in contracts' base units (coins), so that
+    changes reflect positions opened / closed rather than price moves."""
+
+    exchange: str
+    symbol: str
+    ts: int
+    amount: float
+
+
 MarketEvent = Trade | OrderBook
 
 MINUTE_MS = 60_000

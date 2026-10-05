@@ -34,10 +34,11 @@ from enduro.agent.review import HOLD_CHECK_MIN, TradeContext, review_trade, trad
 from enduro.agent.tools import TOOLS, TOOLS_BY_NAME, ToolInputError, to_json
 from enduro.analytics.focus import HISTORY_MS, FocusTracker
 from enduro.analytics.metrics import Bars
+from enduro.analytics.open_interest import OI_WINDOWS_MIN, open_interest_view
 from enduro.analytics.radar import RadarRow
 from enduro.analytics.radar_runner import RadarRunner
 from enduro.analytics.stops import stop_context
-from enduro.core.models import MINUTE_MS, Candle, Funding, now_ms
+from enduro.core.models import MINUTE_MS, Candle, Funding, OpenInterest, now_ms
 from enduro.data.base import MarketDataSource
 from enduro.data.collector import Collector
 from enduro.execution.models import ClosedTrade
@@ -58,6 +59,14 @@ FUNDING_TIMEOUT_S = 5
 FUNDING_NOTE = (
     "rate_pct — ставка ближайшего расчёта (оценка биржи сейчас), + значит лонги платят "
     "шортам; платит или получает позиция, открытая на Bybit в момент расчёта (next_in_min)"
+)
+
+OPEN_INTEREST_REFRESH_MS = 60_000
+OPEN_INTEREST_TIMEOUT_S = 5
+OI_HISTORY_MARGIN_MIN = 10  # the newest history point lags a few minutes
+OPEN_INTEREST_NOTE = (
+    "oi_pct — изменение открытого интереса в монетах за окно, price_pct — изменение цены "
+    "(Binance) за то же время; шаг истории 5 мин, as_of_min_ago — возраст последней точки"
 )
 
 
@@ -136,6 +145,7 @@ class AgentRuntime:
         # Prices of the exchange we trade on, for hindsight on closed trades.
         self.execution_source = execution_source
         self._funding_cache: dict[str, tuple[int, dict[str, Any]]] = {}
+        self._oi_cache: dict[str, tuple[int, dict[str, Any]]] = {}
         # order id -> (hindsight, final, fetched_ms)
         self._hindsight: dict[str, tuple[dict[str, Any], bool, int]] = {}
         self.journal = journal
@@ -234,10 +244,55 @@ class AgentRuntime:
         }
         if funding := await self._funding(symbol):
             context["funding"] = funding
+        if open_interest := await self._open_interest(symbol):
+            context["open_interest"] = open_interest
         snap = self.tracker.snapshot(symbol, now_ms())
         if snap is None:
             return {"symbol": symbol, "status": "waiting for the first live data", **context}
         return {**snap.to_summary(), **context}
+
+    async def _open_interest(self, symbol: str) -> dict[str, Any] | None:
+        """Open interest change vs price change on both exchanges, refreshed at most once
+        a minute; an exchange that does not answer in time is left out."""
+        now = now_ms()
+        cached = self._oi_cache.get(symbol)
+        if cached and now - cached[0] < OPEN_INTEREST_REFRESH_MS:
+            return cached[1]
+        sources = self._market_sources()
+        if not sources:
+            return None
+        minutes = max(OI_WINDOWS_MIN.values()) + OI_HISTORY_MARGIN_MIN
+
+        async def fetch(src: MarketDataSource) -> list[OpenInterest]:
+            async with asyncio.timeout(OPEN_INTEREST_TIMEOUT_S):
+                return await src.fetch_open_interest(symbol, minutes)
+
+        results = await asyncio.gather(
+            *(fetch(s) for s in sources.values()), return_exceptions=True
+        )
+        candles = self.radar.radar.candles(symbol, minutes + 5) if self.radar.radar else []
+        view: dict[str, Any] = {}
+        for ex, result in zip(sources, results, strict=True):
+            if isinstance(result, BaseException):
+                log.warning("%s open interest of %s unavailable: %r", ex, symbol, result)
+            elif summary := open_interest_view(result, candles, now):
+                view[ex] = summary
+        if not view:
+            return cached[1] if cached else None
+        view["note"] = OPEN_INTEREST_NOTE
+        self._oi_cache[symbol] = (now, view)
+        return view
+
+    def _market_sources(self) -> dict[str, MarketDataSource]:
+        """Public market data of both exchanges, execution first."""
+        return {
+            ex: src
+            for ex, src in (
+                (self.execution, self.execution_source),
+                (self.reference, self.reference_source),
+            )
+            if src is not None
+        }
 
     async def _funding(self, symbol: str) -> dict[str, Any] | None:
         """Current funding on both exchanges, refreshed at most once a minute. An exchange
@@ -246,14 +301,7 @@ class AgentRuntime:
         cached = self._funding_cache.get(symbol)
         if cached and now - cached[0] < FUNDING_REFRESH_MS:
             return cached[1]
-        sources = {
-            ex: src
-            for ex, src in (
-                (self.execution, self.execution_source),
-                (self.reference, self.reference_source),
-            )
-            if src is not None
-        }
+        sources = self._market_sources()
         if not sources:
             return None
 
