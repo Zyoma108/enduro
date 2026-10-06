@@ -1,9 +1,10 @@
 """Open interest change next to the price change over the same windows.
 
-The level of open interest alone says little; its change against price says who is
-acting: price up with OI up — new longs; price up with OI down — shorts closing; price
-down with OI up — new shorts; price down with OI down — longs leaving. OI is compared in
-coins (not USD), so a price move alone does not show up as an OI change.
+The level of open interest alone says little; its change against price says how much
+money is behind a move, not its direction (every contract has both a long and a short):
+a move with OI rising is backed by new positions, a move with OI falling runs on
+positions closing. OI is compared in coins (not USD), so a price move alone does not
+show up as an OI change.
 """
 
 from __future__ import annotations
