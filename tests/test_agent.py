@@ -828,3 +828,13 @@ async def test_usage_limit_pauses_until_the_reset(tmp_path, known_reset):
     assert rt._next_check_ms == rt._llm_paused_until_ms
     error = journal.recent("error", 1)[0]
     assert error["what"] == "llm usage limit" and error["resume"].endswith("UTC")
+
+
+async def test_notes_from_an_earlier_session_are_not_shown(tmp_path):
+    llm = ScriptedLLM([[turn(call("finish_tick", next_check_seconds=120, note="fresh"))]])
+    rt, *_, journal = runtime(tmp_path, llm)
+    journal.write("note", n=1, focus=None, text="old rule from yesterday")
+    rt.started_ms = now_ms() + 1  # the earlier note was written before this session
+    await rt.tick("start")
+    first_user = llm.log[0][1]
+    assert "old rule from yesterday" not in first_user and "(none yet)" in first_user

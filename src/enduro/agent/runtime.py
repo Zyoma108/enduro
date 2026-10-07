@@ -160,6 +160,7 @@ class AgentRuntime:
 
         self.focus_symbol: str | None = None
         self.tick_no = 0
+        self.started_ms = now_ms()
         self.session_cost_usd = 0.0
         self._next_check_ms = 0
         self._llm_paused_until_ms = 0  # model usage limit: no ticks before this
@@ -682,7 +683,9 @@ class AgentRuntime:
         except Exception:
             log.warning("cannot read closed trades from the exchange", exc_info=True)
             closed = None
-        notes = self.journal.recent("note", self.config.notes_in_context)
+        # Only this session's notes: earlier ones carry rules the agent made up under an
+        # older prompt, and it copied them forward note after note (2026-10-07).
+        notes = self.journal.recent("note", self.config.notes_in_context, since_ms=self.started_ms)
         parts = [
             f"Tick {self.tick_no} · {datetime.now(UTC):%Y-%m-%d %H:%M:%S} UTC · mode: {mode}"
             f" · trigger: {trigger}",
@@ -738,8 +741,8 @@ class AgentRuntime:
         if reported:
             parts += ["", "## Tooling gaps you already reported (don't repeat them)"]
             parts += [f"- [{r['category']}] {r['title']}" for r in reported]
-        # The journal is read by a Russian-speaking human: without yesterday's notes in
-        # context (after a day off) the model drifted into English (2026-10-04).
+        # The journal is read by a Russian-speaking human: without earlier notes in
+        # context the model drifted into English (2026-10-04).
         parts += [
             "",
             "Реши, что делать сейчас, и закончи проверку вызовом finish_tick. "

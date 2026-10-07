@@ -62,14 +62,17 @@ class Journal:
             return []
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
-    def recent(self, kind: str, limit: int) -> list[dict[str, Any]]:
-        """Most recent records of `kind` from today and yesterday, oldest first."""
+    def recent(self, kind: str, limit: int, since_ms: int = 0) -> list[dict[str, Any]]:
+        """Most recent records of `kind` from today and yesterday (and not older than
+        `since_ms`), oldest first."""
         today = datetime.now(UTC)
         days = [
             f"{today.fromtimestamp(today.timestamp() - 86_400, UTC):%Y-%m-%d}",
             f"{today:%Y-%m-%d}",
         ]
-        records = [r for day in days for r in self.read(day) if r["kind"] == kind]
+        records = [
+            r for day in days for r in self.read(day) if r["kind"] == kind and r["ts"] >= since_ms
+        ]
         return records[-limit:]
 
 
