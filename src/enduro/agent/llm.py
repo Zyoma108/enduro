@@ -57,6 +57,15 @@ class LLMError(RuntimeError):
     pass
 
 
+class UsageLimitError(LLMError):
+    """The model account is out of usage until `resets_at_ms` (None: reset time unknown).
+    Every request fails until then, so the agent should pause instead of retrying."""
+
+    def __init__(self, message: str, resets_at_ms: int | None) -> None:
+        super().__init__(message)
+        self.resets_at_ms = resets_at_ms
+
+
 class LLMSession(Protocol):
     """One agent episode: a fixed system prompt and tool set, an append-only history."""
 

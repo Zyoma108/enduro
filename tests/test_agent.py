@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from enduro.agent.llm import LLMTurn, ToolCall, ToolResult, Usage
+from enduro.agent.llm import LLMTurn, ToolCall, ToolResult, Usage, UsageLimitError
 from enduro.agent.prompt import render_prompt
 from enduro.agent.runtime import AgentConfig, AgentRuntime, wake_threshold_bps
 from enduro.agent.tools import TOOLS
@@ -798,3 +798,33 @@ async def test_focus_is_backfilled_with_recent_trades(tmp_path):
 
     await rt.set_focus("SOL/USDT:USDT", "same coin again")
     assert collector.history_requests == ["SOL/USDT:USDT"]  # no second load
+
+
+class LimitedLLM:
+    """Every session fails with the account's usage limit."""
+
+    name = "limited"
+
+    def __init__(self, resets_at_ms: int | None) -> None:
+        self.resets_at_ms = resets_at_ms
+
+    def session(self, system, tools):
+        resets_at_ms = self.resets_at_ms
+
+        class Session:
+            async def send(self, text):
+                raise UsageLimitError("You've hit your session limit", resets_at_ms)
+
+        return Session()
+
+
+@pytest.mark.parametrize("known_reset", [True, False])
+async def test_usage_limit_pauses_until_the_reset(tmp_path, known_reset):
+    reset = now_ms() + 20 * 60_000
+    rt, *_, journal = runtime(tmp_path, LimitedLLM(reset if known_reset else None))
+    await rt.tick("start")
+    expected = reset + 60_000 if known_reset else now_ms() + 15 * 60_000
+    assert rt._llm_paused_until_ms == pytest.approx(expected, abs=2_000)
+    assert rt._next_check_ms == rt._llm_paused_until_ms
+    error = journal.recent("error", 1)[0]
+    assert error["what"] == "llm usage limit" and error["resume"].endswith("UTC")

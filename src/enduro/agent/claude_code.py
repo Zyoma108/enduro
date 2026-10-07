@@ -19,11 +19,23 @@ import contextlib
 import json
 import logging
 import os
+import re
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from enduro.agent.llm import LLMError, LLMTurn, ToolCaller, ToolResult, ToolSpec, Usage, UsageSink
+from enduro.agent.llm import (
+    LLMError,
+    LLMTurn,
+    ToolCaller,
+    ToolResult,
+    ToolSpec,
+    Usage,
+    UsageLimitError,
+    UsageSink,
+)
 from enduro.agent.mcp_server import ToolServer
 
 log = logging.getLogger(__name__)
@@ -65,15 +77,52 @@ def build_command(
     ]
 
 
-def parse_result(stdout: bytes, returncode: int, stderr: bytes) -> dict[str, Any]:
+def parse_result(
+    stdout: bytes, returncode: int, stderr: bytes, now: datetime | None = None
+) -> dict[str, Any]:
     try:
         data = json.loads(stdout.decode("utf-8", "replace") or "{}")
     except json.JSONDecodeError:
         data = {}
     if returncode != 0 or data.get("is_error") or not data:
         detail = data.get("result") or stderr.decode("utf-8", "replace").strip()[-500:]
-        raise LLMError(f"claude -p failed (exit {returncode}, {data.get('subtype')}): {detail}")
+        message = f"claude -p failed (exit {returncode}, {data.get('subtype')}): {detail}"
+        if _LIMIT_RE.search(detail):
+            raise UsageLimitError(message, limit_reset_ms(detail, now or datetime.now(UTC)))
+        raise LLMError(message)
     return data
+
+
+# "You've hit your session limit · resets 10:50pm (Asia/Yekaterinburg)"
+_LIMIT_RE = re.compile(r"hit your \w+ limit", re.IGNORECASE)
+_RESET_RE = re.compile(
+    r"resets\s+(?:(?P<month>[A-Z][a-z]{2})\s+(?P<day>\d{1,2}),?\s+(?:at\s+)?)?"
+    r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>am|pm)"
+    r"(?:\s*\((?P<tz>[^)]+)\))?",
+    re.IGNORECASE,
+)
+
+
+def limit_reset_ms(text: str, now: datetime) -> int | None:
+    """The reset moment in a usage-limit message, as epoch ms; None if it can't be read."""
+    m = _RESET_RE.search(text)
+    if not m:
+        return None
+    try:
+        tz = ZoneInfo(m["tz"]) if m["tz"] else now.astimezone().tzinfo
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = now.astimezone().tzinfo
+    hour = int(m["hour"]) % 12 + (12 if m["ampm"].lower() == "pm" else 0)
+    local_now = now.astimezone(tz)
+    reset = local_now.replace(hour=hour, minute=int(m["minute"] or 0), second=0, microsecond=0)
+    if m["month"]:
+        month = datetime.strptime(m["month"], "%b").month
+        reset = reset.replace(month=month, day=int(m["day"]))
+        if reset < local_now:
+            reset = reset.replace(year=reset.year + 1)
+    elif reset <= local_now:
+        reset += timedelta(days=1)
+    return int(reset.timestamp() * 1000)
 
 
 def turn_from_result(data: dict[str, Any], model: str) -> LLMTurn:

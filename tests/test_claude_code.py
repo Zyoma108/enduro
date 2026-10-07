@@ -1,5 +1,6 @@
 import itertools
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -60,3 +61,38 @@ def test_parse_result_and_usage():
 def test_parse_result_errors(stdout, code, stderr, fragment):
     with pytest.raises(LLMError, match=fragment):
         parse_result(stdout, code, stderr)
+
+
+def test_usage_limit_is_its_own_error_with_the_reset_time():
+    from enduro.agent.llm import UsageLimitError
+
+    out = json.dumps(
+        {
+            "is_error": True,
+            "subtype": "success",
+            "result": "You've hit your session limit · resets 10:50pm (Asia/Yekaterinburg)",
+        }
+    ).encode()
+    now = datetime(2026, 10, 7, 17, 22, tzinfo=UTC)  # 22:22 in Yekaterinburg (UTC+5)
+    with pytest.raises(UsageLimitError) as info:
+        parse_result(out, 1, b"", now=now)
+    reset = datetime(2026, 10, 7, 17, 50, tzinfo=UTC)
+    assert info.value.resets_at_ms == int(reset.timestamp() * 1000)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("resets 1am (UTC)", datetime(2026, 10, 8, 1, 0)),  # already past today: tomorrow
+        ("resets Oct 9, 10am (UTC)", datetime(2026, 10, 9, 10, 0)),
+        ("resets 12pm (UTC)", datetime(2026, 10, 7, 12, 0)),
+        ("no reset time here", None),
+    ],
+)
+def test_limit_reset_ms(text, expected):
+    from enduro.agent.claude_code import limit_reset_ms
+
+    now = datetime(2026, 10, 7, 10, 0, tzinfo=UTC)
+    got = limit_reset_ms(text, now)
+    want = None if expected is None else int(expected.replace(tzinfo=UTC).timestamp() * 1000)
+    assert got == want

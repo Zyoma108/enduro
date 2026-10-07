@@ -29,6 +29,7 @@ from enduro.agent.llm import (
     LLMError,
     LLMTurn,
     ToolResult,
+    UsageLimitError,
 )
 from enduro.agent.review import HOLD_CHECK_MIN, TradeContext, review_trade, trade_context
 from enduro.agent.tools import TOOLS, TOOLS_BY_NAME, ToolInputError, to_json
@@ -48,6 +49,8 @@ from enduro.trading.service import TradingService
 log = logging.getLogger(__name__)
 
 RETRY_AFTER_ERROR_S = 30  # a tick that failed (model or exchange down) is retried this soon
+USAGE_LIMIT_FALLBACK_S = 15 * 60  # model usage limit with an unreadable reset time
+USAGE_LIMIT_MARGIN_S = 60  # resume this long after the announced reset
 BACKFILL_TIMEOUT_S = 10  # per exchange; paging itself stops after ~5 s
 CLOSED_TRADES_FETCHED = 10
 CLOSED_TRADES_IN_CONTEXT = 5
@@ -159,6 +162,7 @@ class AgentRuntime:
         self.tick_no = 0
         self.session_cost_usd = 0.0
         self._next_check_ms = 0
+        self._llm_paused_until_ms = 0  # model usage limit: no ticks before this
         self._tick_note: str | None = None
         self._wake = asyncio.Event()
         self._wake_reason = "start"
@@ -401,6 +405,13 @@ class AgentRuntime:
             self._wake_on_fired_alerts()  # alerts that fired while the tick was running
             if await self._session_over(max_ticks):
                 break
+            pause_s = (self._llm_paused_until_ms - now_ms()) / 1000
+            if pause_s > 0:
+                # Every model call fails until the reset: alerts and price moves wait too
+                # (positions keep their exchange-side stop and take profit).
+                await asyncio.sleep(pause_s)
+                if self._wake_reason == "scheduled":
+                    self._wake_reason = "resumed after the model usage limit reset"
             timeout = max(0.0, (self._next_check_ms - now_ms()) / 1000)
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout)
@@ -409,6 +420,17 @@ class AgentRuntime:
             if self.wind_down and await self._session_over(max_ticks):
                 break  # the exchange closed the position (stop / take profit) meanwhile
         raise _Done  # stops the background tasks too
+
+    def _pause_for_usage_limit(self, error: UsageLimitError) -> None:
+        resume_ms = (
+            error.resets_at_ms + USAGE_LIMIT_MARGIN_S * 1000
+            if error.resets_at_ms
+            else now_ms() + USAGE_LIMIT_FALLBACK_S * 1000
+        )
+        self._llm_paused_until_ms = self._next_check_ms = resume_ms
+        resume = datetime.fromtimestamp(resume_ms / 1000, UTC).strftime("%Y-%m-%d %H:%M UTC")
+        log.warning("tick %d: %s; pausing until %s", self.tick_no, error, resume)
+        self.journal.write("error", what="llm usage limit", error=str(error), resume=resume)
 
     async def _session_over(self, max_ticks: int | None) -> bool:
         """After `max_ticks` the session ends — but never with a position left unmanaged:
@@ -509,6 +531,8 @@ class AgentRuntime:
         )
         try:
             await self._episode(await self._situation(mode, trigger))
+        except UsageLimitError as e:
+            self._pause_for_usage_limit(e)
         except LLMError as e:
             log.error("tick %d: %s", self.tick_no, e)
             self.journal.write("error", what="llm", error=str(e))
