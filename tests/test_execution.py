@@ -155,3 +155,62 @@ async def test_unsubscribe_order_books_uses_the_subscribed_depth():
     finally:
         await source.close()
     assert seen == {"symbols": ["MOVR/USDT:USDT"], "params": {"limit": 1000}}
+
+
+async def test_invalid_nonce_resyncs_clock_before_retry(monkeypatch):
+    import ccxt.async_support as ccxt
+
+    import enduro.data.ccxt_source as ccxt_source
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr(ccxt_source.asyncio, "sleep", no_sleep)
+    gateway = BybitGateway("k", "s", environment="demo")
+    calls = []
+
+    async def fake_resync():
+        calls.append("resync")
+        return 1600
+
+    async def fake_balance():
+        calls.append("balance")
+        if calls.count("balance") == 1:
+            raise ccxt.InvalidNonce('bybit {"retCode":10002}')
+        return {"USDT": {"free": 5.0, "total": 7.0}}
+
+    gateway._client.load_time_difference = fake_resync
+    gateway._client.fetch_balance = fake_balance
+    try:
+        balance = await gateway.balance()
+    finally:
+        await gateway.close()
+    assert calls == ["balance", "resync", "balance"]
+    assert balance.equity == 7.0
+
+
+async def test_invalid_nonce_on_order_resyncs_but_does_not_resubmit():
+    import ccxt.async_support as ccxt
+
+    gateway = BybitGateway("k", "s", environment="demo")
+    calls = []
+
+    async def fake_resync():
+        calls.append("resync")
+        return 1600
+
+    async def fake_create_order(*args):
+        calls.append("order")
+        raise ccxt.InvalidNonce('bybit {"retCode":10002}')
+
+    gateway._client.load_time_difference = fake_resync
+    gateway._client.create_order = fake_create_order
+    request = OrderRequest(
+        symbol="BTC/USDT:USDT", position_side="long", action="open", qty=0.001, stop_loss=1.0
+    )
+    try:
+        with pytest.raises(ccxt.InvalidNonce):
+            await gateway.place_order(request)
+    finally:
+        await gateway.close()
+    assert calls == ["order", "resync"]

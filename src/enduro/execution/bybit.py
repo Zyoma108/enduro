@@ -162,7 +162,25 @@ class BybitGateway:
             self._client.enable_demo_trading(True)
 
     async def _call(self, what: str, fn, *args, **kwargs):
-        return await with_retries(lambda: fn(*args, **kwargs), f"bybit {what}")
+        async def attempt():
+            try:
+                return await fn(*args, **kwargs)
+            except ccxt.InvalidNonce:
+                await self._resync_clock()
+                raise  # transient: with_retries tries again with the new offset
+
+        return await with_retries(attempt, f"bybit {what}")
+
+    async def _resync_clock(self) -> None:
+        # ccxt measures the clock offset only once, when markets load. A later clock step
+        # (sleep, NTP correction) puts every signed request outside recv_window until the
+        # offset is measured again.
+        try:
+            offset = await self._client.load_time_difference()
+        except Exception as e:
+            log.warning("bybit clock resync failed: %s", e)
+            return
+        log.warning("bybit rejected request timestamp; local clock offset now %d ms", offset)
 
     async def account_state(self) -> AccountState:
         info = await self._call("account info", self._client.privateGetV5AccountInfo)
@@ -230,14 +248,18 @@ class BybitGateway:
     async def place_order(self, request: OrderRequest) -> OrderResult:
         # Not retried: a timeout does not mean the order was not placed. The caller must
         # reconcile by client_order_id instead of blindly resubmitting.
-        raw = await self._client.create_order(
-            request.symbol,
-            request.type,
-            request.side,
-            request.qty,
-            request.price,
-            order_params(request),
-        )
+        try:
+            raw = await self._client.create_order(
+                request.symbol,
+                request.type,
+                request.side,
+                request.qty,
+                request.price,
+                order_params(request),
+            )
+        except ccxt.InvalidNonce:
+            await self._resync_clock()  # so the next request is signed with a valid time
+            raise
         return order_from_ccxt({**raw, "symbol": raw.get("symbol") or request.symbol})
 
     async def set_protection(
