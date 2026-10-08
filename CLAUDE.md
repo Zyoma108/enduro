@@ -27,7 +27,10 @@ making structural changes — it records the agreed principles and open question
 `risk` (limits, sizing, kill switch), `trading` (intent → exchange), `journal`, `agent`
 (runtime, tools, prompt rendering, backends: Claude Code CLI via local MCP, Anthropic API,
 OpenAI-compatible APIs such as DeepSeek / GLM).
-The trader's prompt is `prompts/trader.md` — the user owns its wording.
+The trader's prompt is `prompts/trader.md` (open interest / funding part: `prompts/positioning.md`).
+It may be edited to improve trading: keep it lean — principles, not checklists or thresholds;
+prefer removing wording that over-constrains the agent to adding rules — and say what changed
+and why in the commit.
 
 ## Rules
 
