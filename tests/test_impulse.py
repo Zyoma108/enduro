@@ -81,3 +81,10 @@ async def test_trailing_stop_follows_the_best_price_only_in_profit(tmp_path):
     # 100.5: stop would sit below entry; 101.5 -> ~100.48; 101.2: best unchanged;
     # 103.0 -> 101.97; 103.05: too small a step
     assert [round(m, 2) for m in moves] == [100.48, 101.97]
+
+
+async def test_trail_of_a_closed_position_is_dropped_at_the_next_tick(tmp_path):
+    rt, *_ = runtime(tmp_path, ScriptedLLM([]))
+    rt.set_trail("SOL/USDT:USDT", "long", 0.01)
+    await rt._situation("search", "scheduled")
+    assert rt.trails == {}

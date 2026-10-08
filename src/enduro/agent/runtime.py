@@ -782,6 +782,10 @@ class AgentRuntime:
 
     async def _situation(self, mode: str, trigger: str) -> str:
         account = await self.trading.account()
+        held = {(p["symbol"], p["side"]) for p in account["positions"]}
+        for key in [k for k in self.trails if k not in held]:  # closed since: forget it
+            self.trails.pop(key, None)
+            self._trail_best.pop(key, None)
         try:
             closed = await self._sync_closed_trades()
         except Exception:
