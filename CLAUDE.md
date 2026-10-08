@@ -17,13 +17,16 @@ making structural changes — it records the agreed principles and open question
 - Journal: `.venv/bin/enduro journal [--day YYYY-MM-DD] [-f] [-a]` (human-readable decisions).
 - Agent: `.venv/bin/enduro agent --dry-run --ticks 2` (no orders, but each tick runs
   `claude -p` on the user's subscription — keep test runs short); without `--dry-run` it trades.
+  `--model deepseek` (or another `[models.*]` profile in config.toml) switches the model;
+  API-backed profiles bill the provider's API.
 
 ## Layout
 
 `src/enduro/` — `core` (models), `data` (collection), `storage` (Parquet + DuckDB),
 `analytics` (metrics, baselines, radar, focus), `execution` (gateway protocol + Bybit),
 `risk` (limits, sizing, kill switch), `trading` (intent → exchange), `journal`, `agent`
-(runtime, tools, prompt rendering, backends: Claude Code CLI via local MCP, or API).
+(runtime, tools, prompt rendering, backends: Claude Code CLI via local MCP, Anthropic API,
+OpenAI-compatible APIs such as DeepSeek / GLM).
 The trader's prompt is `prompts/trader.md` — the user owns its wording.
 
 ## Rules

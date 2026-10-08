@@ -53,6 +53,10 @@ class LLMTurn:
     model: str = ""  # the model that actually answered (may differ after a fallback)
 
 
+# Tool call input set by an adapter when the model's arguments were not a JSON object.
+INVALID_ARGUMENTS = "_invalid_arguments"
+
+
 class LLMError(RuntimeError):
     pass
 
@@ -136,6 +140,11 @@ class ApiLoopBackend:
                 return turn.text
             results = []
             for c in turn.tool_calls:
+                if INVALID_ARGUMENTS in c.input:
+                    raw = str(c.input[INVALID_ARGUMENTS])[:300]
+                    error = f"arguments must be a JSON object; got: {raw}"
+                    results.append(ToolResult(c.id, error, is_error=True))
+                    continue
                 result = await call_tool(c.name, c.input)
                 results.append(ToolResult(c.id, result.content, result.is_error))
             if is_done() or call_no == self.max_calls - 1:

@@ -10,6 +10,7 @@ dependencies = [
     "duckdb>=1.2",
     "mcp>=2.2",
     "numpy>=2.1",
+    "openai>=3",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
     "pyarrow>=19",

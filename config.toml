@@ -74,16 +74,9 @@ max_trades_per_hour = 6
 state_path = "state/risk.json"
 
 [agent]
-# Как запускается модель:
-#   "claude-code" — через Claude Code CLI (`claude -p`) под вашей учётной записью/подпиской;
-#   "api"         — через Anthropic API (нужен ENDURO_ANTHROPIC__API_KEY в .env).
-backend = "claude-code"
-claude_bin = "claude"
-# Сколько ждать один тик в режиме claude-code, секунд.
-claude_timeout_s = 300
-# Модель и глубина размышлений (low | medium | high | xhigh | max).
-model = "claude-opus-5-5"
-effort = "medium"
+# Какой профиль из [models.*] (в конце файла) торгует. Разово можно выбрать другой:
+# `enduro agent --model deepseek`.
+model_profile = "claude-cli"
 # Промпт с «духом» торговли. Числа лимитов подставляются из [risk] автоматически.
 prompt_path = "prompts/trader.md"
 journal_dir = "state/journal"
@@ -105,3 +98,40 @@ min_wake_gap_position_s = 15
 # Без открытой позиции (поиск и фокус) плановые проверки не чаще чем раз в столько секунд,
 # даже если агент просит раньше. Резкое движение всё равно разбудит его.
 min_check_flat_s = 120
+
+# Профили моделей. backend:
+#   "claude-code" — Claude Code CLI (`claude -p`) под вашей подпиской;
+#   "anthropic"   — Anthropic API (ENDURO_ANTHROPIC__API_KEY в .env);
+#   "openai"      — любой OpenAI-совместимый API (DeepSeek, Z.ai GLM).
+# credentials — чей ключ брать: ENDURO_<ИМЯ>__API_KEY в .env (сами ключи — только там).
+# price_per_mtok — цены USD за миллион токенов для оценки расхода (input / output /
+# cache_read); у DeepSeek указаны пиковые, вне пиковых часов вдвое дешевле.
+
+[models.claude-cli]
+backend = "claude-code"
+model = "claude-opus-5-5"
+effort = "medium"          # low | medium | high | xhigh | max
+timeout_s = 300            # сколько ждать один тик
+
+[models.claude-api]
+backend = "anthropic"
+model = "claude-opus-5-5"
+effort = "medium"
+credentials = "anthropic"
+
+[models.deepseek]
+backend = "openai"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-pro"
+credentials = "deepseek"
+effort = "high"            # reasoning_effort: low | high | max
+extra_body = { thinking = { type = "enabled" } }
+price_per_mtok = { input = 1.32, output = 3.96, cache_read = 0.044 }
+
+[models.glm]
+backend = "openai"
+base_url = "https://api.z.ai/api/paas/v4"
+model = "glm-5"
+credentials = "glm"
+extra_body = { thinking = { type = "enabled" } }
+price_per_mtok = {}        # заполнить перед первым запуском GLM

@@ -350,32 +350,66 @@ def _risk(settings: Settings, reset: bool) -> None:
     print(f"opens/hour  : {len(state.opens)} recorded")
 
 
-async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> None:
+def _model(settings: Settings, name: str):
+    """The LLM client / episode backend for the [models.<name>] profile."""
+    if name not in settings.models:
+        sys.exit(
+            f"unknown model profile {name!r}; configured: {', '.join(sorted(settings.models))}"
+        )
+    profile = settings.models[name]
+    key = getattr(settings, profile.credentials).api_key if profile.credentials else None
+    api_key = key.get_secret_value() if key else None
+    if profile.backend == "claude-code":
+        from enduro.agent.claude_code import ClaudeCodeBackend
+
+        if shutil.which(profile.claude_bin) is None:
+            sys.exit(f"Claude Code CLI not found: {profile.claude_bin!r}")
+        return ClaudeCodeBackend(
+            profile.model,
+            profile.effort or "medium",
+            timeout_s=profile.timeout_s,
+            claude_bin=profile.claude_bin,
+        )
+    if profile.backend == "anthropic":
+        from enduro.agent.claude import ClaudeClient
+
+        if not api_key and not os.environ.get("ANTHROPIC_API_KEY"):
+            sys.exit("no Anthropic API key: set ENDURO_ANTHROPIC__API_KEY in .env")
+        return ClaudeClient(profile.model, profile.effort or "medium", profile.max_tokens, api_key)
+    from enduro.agent.openai_compat import OpenAICompatClient
+
+    if not api_key:
+        sys.exit(
+            f"no API key for {name}: set ENDURO_{profile.credentials.upper()}__API_KEY in .env"
+        )
+    extra = dict(profile.extra_body)
+    if profile.effort:
+        extra.setdefault("reasoning_effort", profile.effort)
+    return OpenAICompatClient(
+        profile.model,
+        base_url=profile.base_url,
+        api_key=api_key,
+        max_tokens=profile.max_tokens,
+        extra_body=extra,
+        prices=profile.price_per_mtok,
+        timeout_s=profile.timeout_s,
+    )
+
+
+async def _agent(
+    settings: Settings, dry_run: bool, max_ticks: int | None, model: str | None = None
+) -> None:
     _cancel_on_shutdown_signals()
     from enduro.agent.alerts import AlertBook
-    from enduro.agent.claude import ClaudeClient
-    from enduro.agent.claude_code import ClaudeCodeBackend
     from enduro.agent.prompt import render_prompt
     from enduro.agent.runtime import AgentConfig, AgentRuntime
     from enduro.journal.journal import Journal
     from enduro.trading.service import ChaseSettings, TradingService
 
     market, agent_cfg = settings.market, settings.agent
-    if agent_cfg.backend == "api":
-        key = settings.anthropic.api_key
-        api_key = key.get_secret_value() if key else None
-        if not api_key and not os.environ.get("ANTHROPIC_API_KEY"):
-            sys.exit("no Anthropic API key: set ENDURO_ANTHROPIC__API_KEY in .env")
-        llm = ClaudeClient(agent_cfg.model, agent_cfg.effort, agent_cfg.max_tokens, api_key)
-    else:
-        if shutil.which(agent_cfg.claude_bin) is None:
-            sys.exit(f"Claude Code CLI not found: {agent_cfg.claude_bin!r}")
-        llm = ClaudeCodeBackend(
-            agent_cfg.model,
-            agent_cfg.effort,
-            timeout_s=agent_cfg.claude_timeout_s,
-            claude_bin=agent_cfg.claude_bin,
-        )
+    profile_name = model or agent_cfg.model_profile
+    llm = _model(settings, profile_name)
+    profile = settings.models[profile_name]
 
     from enduro.journal.render import format_record
 
@@ -471,9 +505,10 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
             log.warning("open position on %s at start: focusing on it", held)
         journal.write(
             "start",
-            backend=agent_cfg.backend,
-            model=agent_cfg.model,
-            effort=agent_cfg.effort,
+            profile=profile_name,
+            backend=profile.backend,
+            model=profile.model,
+            effort=profile.effort,
             dry_run=dry_run,
             environment=settings.execution.environment,
             universe=len(symbols),
@@ -738,6 +773,9 @@ def main() -> None:
         "--dry-run", action="store_true", help="decide and journal, but never send orders"
     )
     agent.add_argument("--ticks", type=int, help="stop after N ticks")
+    agent.add_argument(
+        "--model", help="model profile from [models] in config.toml (default: agent.model_profile)"
+    )
 
     feedback = commands.add_parser("feedback", help="tooling gaps reported by the agent")
     feedback.add_argument("--days", type=int, default=7, help="how many days back")
@@ -784,7 +822,7 @@ def main() -> None:
             asyncio.run(_focus(settings, args.symbols, args.interval, args.json))
     elif args.command == "agent":
         with contextlib.suppress(asyncio.CancelledError):
-            asyncio.run(_agent(settings, args.dry_run, args.ticks))
+            asyncio.run(_agent(settings, args.dry_run, args.ticks, args.model))
     elif args.command == "feedback":
         _feedback(settings, args.days)
     elif args.command == "journal":

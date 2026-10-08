@@ -39,6 +39,7 @@ python3 -m venv .venv
 # Агент. По умолчанию модель запускается через Claude Code CLI (`claude -p`) под вашей
 # учётной записью; промпт — prompts/trader.md, журнал — state/journal/*.jsonl
 .venv/bin/enduro agent --dry-run --ticks 3   # решения без отправки ордеров
+.venv/bin/enduro agent --model deepseek      # другая модель: профиль из [models.*]
 .venv/bin/enduro agent                       # торговля на demo
 .venv/bin/enduro feedback                    # чего агенту не хватило (отзывы на инструменты)
 .venv/bin/enduro journal -f                  # журнал по-человечески (--day, -a — всё подряд)

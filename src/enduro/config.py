@@ -7,7 +7,7 @@ Secrets must only come from env / .env, never from config.toml.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import (
@@ -81,15 +81,50 @@ class RiskConfig(BaseModel):
     state_path: Path = Path("state/risk.json")
 
 
-class AgentSettings(BaseModel):
-    # "claude-code": the model runs through the Claude Code CLI (`claude -p`) on the
-    # account it is logged into; "api": Anthropic API (needs ENDURO_ANTHROPIC__API_KEY).
-    backend: Literal["claude-code", "api"] = "claude-code"
-    claude_bin: str = "claude"
-    claude_timeout_s: float = Field(default=300.0, gt=0)
-    model: str = "claude-opus-5-5"
-    effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+Credentials = Literal["anthropic", "deepseek", "glm"]
+
+
+class ModelProfile(BaseModel):
+    """One way to run the trader's model: `[models.<name>]` in config.toml.
+
+    backend:
+      "claude-code" — Claude Code CLI (`claude -p`) on the account it is logged into;
+      "anthropic"   — Anthropic Messages API;
+      "openai"      — any OpenAI-compatible Chat Completions API (DeepSeek, Z.ai GLM).
+    """
+
+    backend: Literal["claude-code", "anthropic", "openai"]
+    model: str
+    # Claude: low | medium | high | xhigh | max. OpenAI-compatible: sent as
+    # `reasoning_effort` when set (DeepSeek: low | high | max).
+    effort: str | None = None
+    base_url: str | None = None  # required for "openai"
+    # Which ENDURO_<NAME>__API_KEY to use (secrets live in .env only).
+    credentials: Credentials | None = None
     max_tokens: int = Field(default=16_000, ge=1_000)
+    timeout_s: float = Field(default=300.0, gt=0)
+    claude_bin: str = "claude"
+    # Extra request fields for OpenAI-compatible providers, e.g. thinking mode.
+    extra_body: dict[str, Any] = Field(default_factory=dict)
+    # USD per million tokens: input, output, cache_read — for the session cost estimate.
+    price_per_mtok: dict[str, float] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _openai_needs_endpoint(self) -> Self:
+        if self.backend == "openai" and (not self.base_url or not self.credentials):
+            raise ValueError("an openai-compatible profile needs base_url and credentials")
+        return self
+
+
+def _default_models() -> dict[str, ModelProfile]:
+    return {
+        "claude-cli": ModelProfile(backend="claude-code", model="claude-opus-5-5", effort="medium")
+    }
+
+
+class AgentSettings(BaseModel):
+    # Which [models.<name>] profile runs the trader (`enduro agent --model NAME` overrides).
+    model_profile: str = "claude-cli"
     prompt_path: Path = Path("prompts/trader.md")
     journal_dir: Path = Path("state/journal")
     search_interval_s: int = Field(default=180, ge=15)
@@ -105,7 +140,8 @@ class AgentSettings(BaseModel):
 
 
 class ApiKey(BaseModel):
-    """ENDURO_ANTHROPIC__API_KEY in .env (falls back to the SDK's own resolution)."""
+    """ENDURO_<PROVIDER>__API_KEY in .env; for Anthropic, the SDK's own resolution is the
+    fallback."""
 
     api_key: SecretStr | None = None
 
@@ -138,7 +174,19 @@ class Settings(BaseSettings):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     bybit: ApiCredentials = Field(default_factory=ApiCredentials)
     agent: AgentSettings = Field(default_factory=AgentSettings)
+    models: dict[str, ModelProfile] = Field(default_factory=_default_models)
     anthropic: ApiKey = Field(default_factory=ApiKey)
+    deepseek: ApiKey = Field(default_factory=ApiKey)  # ENDURO_DEEPSEEK__API_KEY
+    glm: ApiKey = Field(default_factory=ApiKey)  # ENDURO_GLM__API_KEY
+
+    @model_validator(mode="after")
+    def _model_profile_exists(self) -> Self:
+        if self.agent.model_profile not in self.models:
+            raise ValueError(
+                f"agent.model_profile={self.agent.model_profile!r} is not in "
+                f"[models]: {sorted(self.models)}"
+            )
+        return self
 
     @classmethod
     def settings_customise_sources(
