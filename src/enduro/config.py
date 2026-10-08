@@ -139,6 +139,10 @@ class AgentSettings(BaseModel):
     min_check_flat_s: int = Field(default=120, ge=15)
     # Open interest and funding in the focus view and the prompt (prompts/positioning.md).
     show_positioning: bool = True
+    # Wake the agent on a 5m break of a coin's 2h range on this many times its average
+    # volume of the day (0 turns it off), at most once per coin and direction per cooldown.
+    impulse_volume_vs_24h: float = Field(default=10.0, ge=0)
+    impulse_cooldown_min: int = Field(default=60, ge=1)
 
 
 class ApiKey(BaseModel):

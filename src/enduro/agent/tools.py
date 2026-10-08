@@ -67,6 +67,16 @@ def _side(args: dict[str, Any]) -> str:
     return side
 
 
+def _trail(args: dict[str, Any]) -> float | None:
+    """trail_pct as a fraction of price; 0 removes the trail."""
+    pct = _num(args, "trail_pct", required=False)
+    if pct is None:
+        return None
+    if pct > 20:
+        raise ToolInputError("'trail_pct' is a percent of price, at most 20")
+    return pct / 100
+
+
 def _text(args: dict[str, Any], key: str) -> str:
     value = str(args.get(key) or "").strip()
     if not value:
@@ -173,7 +183,11 @@ async def open_position(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any
         take_profit=_num(args, "take_profit", required=False) or None,
         risk_pct=risk_pct,
     )
+    trail = _trail(args)
     result = await rt.trading.open(intent, thesis=_text(args, "thesis"))
+    if trail and result.get("avg_price"):
+        rt.set_trail(intent.symbol, intent.side, trail)
+        result["trailing_stop_pct"] = round(trail * 100, 3)
     entry = result.get("avg_price") or (result.get("would_open") or {}).get("expected_entry")
     if entry:
         distance = abs(entry - intent.stop_loss) / entry
@@ -194,11 +208,21 @@ async def close_position(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, An
 async def update_protection(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
     if rt.focus_symbol is None:
         raise ToolInputError("no focus symbol")
+    side = _side(args)
     stop = _num(args, "stop_loss", required=False)
     take = _num(args, "take_profit", required=False)
-    if stop is None and take is None:
-        raise ToolInputError("give stop_loss and/or take_profit")
-    return await rt.trading.protect(rt.focus_symbol, _side(args), stop, take)
+    trail = _trail(args)
+    if stop is None and take is None and trail is None:
+        raise ToolInputError("give stop_loss, take_profit and/or trail_pct")
+    result: dict[str, Any] = {}
+    if stop is not None or take is not None:
+        result = await rt.trading.protect(rt.focus_symbol, side, stop, take)
+    if trail is not None:
+        if not await rt.has_open_position(rt.focus_symbol):
+            raise ToolInputError(f"no open {side} position on {rt.focus_symbol} to trail")
+        rt.set_trail(rt.focus_symbol, side, trail)
+        result["trailing_stop_pct"] = round(trail * 100, 3) if trail else "removed"
+    return result
 
 
 async def set_alert(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
@@ -275,6 +299,13 @@ async def finish_tick(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------- registry
 
 _SIDE = {"type": "string", "enum": ["long", "short"]}
+_TRAIL = {
+    "type": "number",
+    "minimum": 0,
+    "description": "Trailing stop distance, % of price: once price has moved this far your "
+    "way, the stop follows the best price since at this distance (checked every ~10 s, "
+    "only ever tightened). 0 removes the trail; the stop stays where it is.",
+}
 
 TOOLS: list[Tool] = [
     Tool(
@@ -369,6 +400,7 @@ TOOLS: list[Tool] = [
                     "stop_loss": {"type": "number"},
                     "take_profit": {"type": "number"},
                     "risk_pct": {"type": "number", "exclusiveMinimum": 0},
+                    "trail_pct": _TRAIL,
                     "thesis": {"type": "string"},
                 },
                 ["side", "stop_loss", "thesis"],
@@ -393,13 +425,15 @@ TOOLS: list[Tool] = [
         ToolSpec(
             "update_protection",
             "Move the stop loss and/or take profit of an open position (0 removes the "
-            "take profit). A stop can be tightened freely; loosening it is allowed only "
+            "take profit), or set / change / remove a trailing stop (trail_pct). A stop "
+            "can be tightened freely; loosening it is allowed only "
             "within the per-trade risk budget; it can never be removed.",
             _schema(
                 {
                     "side": _SIDE,
                     "stop_loss": {"type": "number"},
                     "take_profit": {"type": "number"},
+                    "trail_pct": _TRAIL,
                 },
                 ["side"],
             ),

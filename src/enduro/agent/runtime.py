@@ -34,6 +34,7 @@ from enduro.agent.llm import (
 from enduro.agent.review import HOLD_CHECK_MIN, TradeContext, review_trade, trade_context
 from enduro.agent.tools import TOOLS, TOOLS_BY_NAME, ToolInputError, to_json
 from enduro.analytics.focus import HISTORY_MS, FocusTracker
+from enduro.analytics.impulse import RANGE_MIN, Impulse, detect_impulse, market_context
 from enduro.analytics.metrics import Bars
 from enduro.analytics.open_interest import OI_WINDOWS_MIN, open_interest_view
 from enduro.analytics.radar import RadarRow
@@ -63,6 +64,10 @@ FUNDING_NOTE = (
     "rate_pct — ставка ближайшего расчёта (оценка биржи сейчас), + значит лонги платят "
     "шортам; платит или получает позиция, открытая на Bybit в момент расчёта (next_in_min)"
 )
+
+MARKET_LEADERS = ("BTC/USDT:USDT", "ETH/USDT:USDT")
+IMPULSES_IN_CONTEXT_MS = 60 * MINUTE_MS
+TRAIL_MIN_STEP = 0.2  # move a trailing stop only by at least this share of its distance
 
 OPEN_INTEREST_REFRESH_MS = 60_000
 OPEN_INTEREST_TIMEOUT_S = 5
@@ -109,6 +114,10 @@ class AgentConfig:
     min_wake_gap_position_s: int = 15
     min_check_flat_s: int = 120  # no position: scheduled checks no more often than this
     show_positioning: bool = True  # open interest and funding in the focus view
+    # Wake the agent (when flat) on an impulse: a 5m break of the 2h range on at least this
+    # many times the coin's average volume of the day; 0 turns it off.
+    impulse_volume_vs_24h: float = 10.0
+    impulse_cooldown_min: int = 60  # per coin and direction
     notes_in_context: int = 10
     feedback_in_context: int = 15
     radar_rows_in_context: int = 10
@@ -173,6 +182,12 @@ class AgentRuntime:
         self._had_position = False
         self.alerts = alerts or AlertBook()
         self._fired_alerts: list[FiredAlert] = []
+        self._impulses: list[Impulse] = []  # recent, newest last
+        self._new_impulses: list[Impulse] = []  # not yet shown as a wake-up reason
+        # Trailing stops the agent asked for: (symbol, side) -> distance (fraction of price)
+        # and the best price seen since.
+        self.trails: dict[tuple[str, str], float] = {}
+        self._trail_best: dict[tuple[str, str], float] = {}
         self._in_tick = False
         # Tick limit reached with a position open: keep managing it, no new entries.
         self.wind_down = False
@@ -331,6 +346,15 @@ class AgentRuntime:
         self._funding_cache[symbol] = (now, view)
         return view
 
+    def market_view(self) -> dict[str, Any]:
+        radar = self.radar.radar
+        if radar is None:
+            return {}
+        day = 24 * 60
+        leaders = {s: radar.candles(s, day) for s in MARKET_LEADERS if s in self.universe}
+        universe = {s: radar.candles(s, day) for s in self.universe}
+        return market_context(leaders, universe)
+
     async def price_history(self, symbol: str, interval: str, bars: int) -> list[Candle]:
         minutes = {"1m": 1, "5m": 5, "15m": 15, "1h": 60}[interval]
         since = now_ms() - (bars + 1) * minutes * MINUTE_MS
@@ -469,15 +493,44 @@ class AgentRuntime:
         for f in fired:
             self.journal.write("alert", action="fired", alert=f.alert, close=f.candle.close)
         self._fired_alerts += fired
+        self._detect_impulses(now)
         self._wake_on_fired_alerts()
+
+    def _detect_impulses(self, now: int) -> None:
+        radar = self.radar.radar
+        threshold = self.config.impulse_volume_vs_24h
+        if radar is None or threshold <= 0:
+            return
+        self._impulses = [i for i in self._impulses if now - i.ts <= IMPULSES_IN_CONTEXT_MS]
+        cooldown = self.config.impulse_cooldown_min * MINUTE_MS
+        for symbol in self.universe:
+            if self.radar.liquidity.tradable(symbol) is False:
+                continue
+            impulse = detect_impulse(symbol, radar.candles(symbol, 24 * 60), threshold)
+            if impulse is None or any(
+                i.symbol == symbol
+                and i.direction == impulse.direction
+                and impulse.ts - i.ts < cooldown
+                for i in self._impulses
+            ):
+                continue
+            self._impulses.append(impulse)
+            self.journal.write("impulse", impulse=impulse)
+            if not self._had_position:
+                self._new_impulses.append(impulse)
 
     def _wake_on_fired_alerts(self) -> None:
         # A wake-up set during a tick would be cleared when it ends: keep them until then.
-        if not self._fired_alerts or self._in_tick:
+        if not (self._fired_alerts or self._new_impulses) or self._in_tick:
             return
-        self._wake_reason = "; ".join(f.describe() for f in self._fired_alerts)
-        self._fired_alerts = []
-        self._wake.set()
+        if self._had_position:
+            self._new_impulses = []  # a new coin cannot be traded while in a position
+        reasons = [f.describe() for f in self._fired_alerts]
+        reasons += [i.describe() for i in self._new_impulses]
+        self._fired_alerts, self._new_impulses = [], []
+        if reasons:
+            self._wake_reason = "; ".join(reasons)
+            self._wake.set()
 
     async def _consume_focus_events(self, queue: asyncio.Queue) -> None:
         while True:
@@ -523,6 +576,49 @@ class AgentRuntime:
             if not await self.has_open_position(self.focus_symbol):
                 self._wake_reason = "position closed on the exchange (stop or take profit)"
                 self._wake.set()
+            elif self.trails:
+                await self._trail_once()
+
+    def set_trail(self, symbol: str, side: str, distance: float) -> None:
+        key = (symbol, side)
+        if distance <= 0:
+            self.trails.pop(key, None)
+            self._trail_best.pop(key, None)
+        else:
+            self.trails[key] = distance
+        self.journal.write("trail", symbol=symbol, side=side, distance_pct=round(distance * 100, 3))
+
+    async def _trail_once(self) -> None:
+        """Follow the best price since the trail was set with the stop, once the stop can
+        go to breakeven or better; never loosen it."""
+        for key, distance in list(self.trails.items()):
+            symbol, side = key
+            position = next(
+                (p for p in await self.trading.gateway.positions([symbol]) if p.side == side), None
+            )
+            if position is None:
+                self.trails.pop(key, None)
+                self._trail_best.pop(key, None)
+                continue
+            book = self.tracker.latest_book(self.execution, symbol)
+            price = book.mid if book and book.mid else position.mark_price
+            if not price:
+                continue
+            long = side == "long"
+            best = self._trail_best.get(key, price)
+            best = max(best, price) if long else min(best, price)
+            self._trail_best[key] = best
+            stop = best * (1 - distance) if long else best * (1 + distance)
+            entry, current = position.entry_price, position.stop_loss
+            if (stop < entry) if long else (stop > entry):
+                continue  # not yet in profit by the trail distance
+            step = TRAIL_MIN_STEP * distance * price
+            if current is not None and ((stop - current) if long else (current - stop)) < step:
+                continue
+            result = await self.trading.protect(symbol, side, stop, None)
+            self.journal.write(
+                "trail", symbol=symbol, side=side, moved_stop_to=stop, best=best, result=result
+            )
 
     async def tick(self, trigger: str) -> None:
         self.tick_no += 1
@@ -722,6 +818,28 @@ class AgentRuntime:
                 "задела бы раньше, твой стоп или тейк.",
             ]
             parts += [json.dumps(c, ensure_ascii=False) for c in closed]
+        if market := self.market_view():
+            parts += [
+                "",
+                "## Market (Binance price change %; universe: share of coins up, median change)",
+                json.dumps(market, ensure_ascii=False),
+            ]
+        if self._impulses:
+            parts += [
+                "",
+                f"## Impulses in the last hour (5m break of the {RANGE_MIN // 60}h range on heavy "
+                "volume), newest last",
+            ]
+            parts += [
+                f"- {datetime.fromtimestamp(i.ts / 1000, UTC):%H:%M} {i.describe()}"
+                for i in self._impulses
+            ]
+        if self.trails:
+            parts += ["", "## Your trailing stops"]
+            parts += [
+                f"- {s} {side}: {d * 100:.2f}% from the best price since set"
+                for (s, side), d in self.trails.items()
+            ]
         if mode == "focus":
             parts += [
                 "",

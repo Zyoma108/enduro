@@ -76,7 +76,7 @@ state_path = "state/risk.json"
 [agent]
 # Какой профиль из [models.*] (в конце файла) торгует. Разово можно выбрать другой:
 # `enduro agent --model deepseek`.
-model_profile = "claude-cli"
+model_profile = "deepseek"
 # Промпт с «духом» торговли. Числа лимитов подставляются из [risk] автоматически.
 prompt_path = "prompts/trader.md"
 journal_dir = "state/journal"

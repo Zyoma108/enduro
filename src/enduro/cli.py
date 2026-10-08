@@ -492,6 +492,8 @@ async def _agent(
                 min_wake_gap_position_s=agent_cfg.min_wake_gap_position_s,
                 min_check_flat_s=agent_cfg.min_check_flat_s,
                 show_positioning=agent_cfg.show_positioning,
+                impulse_volume_vs_24h=agent_cfg.impulse_volume_vs_24h,
+                impulse_cooldown_min=agent_cfg.impulse_cooldown_min,
             ),
             universe=symbols,
             reference=market.reference_exchange,
