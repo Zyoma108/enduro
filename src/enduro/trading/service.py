@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from enduro.core.models import now_ms
-from enduro.execution.base import ExecutionGateway
+from enduro.execution.base import ExecutionGateway, PositionClosed
 from enduro.execution.models import OrderRequest, Position, PositionSide
 from enduro.journal.journal import Journal
 from enduro.risk.manager import OpenIntent, RiskManager
@@ -192,7 +192,15 @@ class TradingService:
             return {"updated": False, "rejected_by_risk": reason}
         if self.dry_run:
             return {"updated": False, "dry_run": True}
-        await self.gateway.set_protection(symbol, side, stop_loss, take_profit)
+        try:
+            await self.gateway.set_protection(symbol, side, stop_loss, take_profit)
+        except PositionClosed:
+            # Raced with the exchange: the stop or take profit filled just before.
+            return {
+                "updated": False,
+                "error": f"the {side} position on {symbol} is already closed: its stop or "
+                "take profit filled on the exchange",
+            }
         updated = await self._position(symbol, side)
         return {"updated": True, "position": _position_view(updated) if updated else None}
 

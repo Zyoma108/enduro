@@ -17,6 +17,11 @@ from enduro.execution.models import (
 )
 
 
+class PositionClosed(Exception):
+    """The position to update is gone: its stop or take profit filled on the exchange
+    in the meantime."""
+
+
 class ExecutionGateway(Protocol):
     environment: str  # "demo" | "live"
 

@@ -14,6 +14,7 @@ from typing import Any, Literal
 import ccxt.async_support as ccxt
 
 from enduro.data.ccxt_source import is_linear_usdt_perp, with_retries
+from enduro.execution.base import PositionClosed
 from enduro.execution.models import (
     AccountState,
     Balance,
@@ -37,6 +38,7 @@ _MARGIN_MODES = {
 }
 # "Not modified" answers when a setting already has the requested value.
 _ALREADY_SET = ("110025", "110043", "34040")  # position mode, leverage, trading stop
+_ZERO_POSITION = "zero position"  # retCode 10001: "can not set tp/sl/ts for zero position"
 
 
 class LiveTradingNotAllowed(RuntimeError):
@@ -291,6 +293,8 @@ class BybitGateway:
         try:
             await self._call("trading stop", self._client.privatePostV5PositionTradingStop, request)
         except ccxt.ExchangeError as e:
+            if _ZERO_POSITION in str(e):
+                raise PositionClosed(f"{side} position on {symbol} is already closed") from e
             if not _already_set(e):
                 raise
 

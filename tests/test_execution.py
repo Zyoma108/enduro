@@ -214,3 +214,70 @@ async def test_invalid_nonce_on_order_resyncs_but_does_not_resubmit():
     finally:
         await gateway.close()
     assert calls == ["order", "resync"]
+
+
+async def test_protecting_a_position_that_just_closed_raises_position_closed():
+    import ccxt.async_support as ccxt
+
+    from enduro.execution.base import PositionClosed
+
+    gateway = BybitGateway("k", "s", environment="demo")
+
+    async def no_markets():
+        return {}
+
+    async def trading_stop(request):
+        raise ccxt.BadRequest(
+            'bybit {"retCode":10001,"retMsg":"can not set tp/sl/ts for zero position"}'
+        )
+
+    gateway._client.load_markets = no_markets
+    gateway._client.market = lambda symbol: {"id": "JUPUSDT"}
+    gateway._client.price_to_precision = lambda symbol, price: str(price)
+    gateway._client.privatePostV5PositionTradingStop = trading_stop
+    try:
+        with pytest.raises(PositionClosed):
+            await gateway.set_protection("JUP/USDT:USDT", "long", stop_loss=0.3385)
+    finally:
+        await gateway.close()
+
+
+async def test_service_reports_a_closed_position_instead_of_failing(tmp_path):
+    from enduro.execution.base import PositionClosed
+    from enduro.execution.models import Balance, Position
+    from enduro.journal.journal import Journal
+    from enduro.risk.manager import RiskLimits, RiskManager, RiskStateStore
+    from enduro.trading.service import TradingService
+
+    position = Position(
+        symbol="JUP/USDT:USDT",
+        side="long",
+        size=1408.0,
+        entry_price=0.336,
+        mark_price=0.342,
+        unrealized_pnl=8.4,
+        leverage=5.0,
+        liquidation_price=None,
+        stop_loss=0.3373,
+        take_profit=0.3448,
+    )
+
+    class Gateway:
+        environment = "demo"
+
+        async def positions(self, symbols=None):
+            return [position]
+
+        async def balance(self):
+            return Balance(equity=1000.0, available=1000.0)
+
+        async def set_protection(self, symbol, side, stop_loss=None, take_profit=None):
+            raise PositionClosed("gone")
+
+    async def quote(symbol):
+        return 0.3446, 0.3448
+
+    risk = RiskManager(RiskLimits(), 0.00055, RiskStateStore(tmp_path / "r.json"))
+    service = TradingService(Gateway(), risk, Journal(tmp_path / "j"), quote)
+    result = await service.protect("JUP/USDT:USDT", "long", stop_loss=0.3385, take_profit=None)
+    assert result["updated"] is False and "already closed" in result["error"]
