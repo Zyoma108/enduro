@@ -127,7 +127,11 @@ async def _account(settings: Settings, setup: bool) -> None:
         )
     print(f"open orders : {len(orders)}")
     for o in orders:
-        print(f"  {o.symbol:<18} {o.side:<4} {o.qty:g} @ {o.avg_price} [{o.status}] id={o.id}")
+        # Resting limits show their price; the position's stop is a market order that
+        # waits for its trigger.
+        price = f"@ {o.price:g}" if o.price else "market on trigger"
+        label = f" {o.client_order_id}" if o.client_order_id else ""
+        print(f"  {o.symbol:<18} {o.side:<4} {o.qty:g} {price} [{o.status}]{label} id={o.id}")
     if not setup and (state.margin_mode != "cross" or not state.hedge_mode):
         print("\naccount is not in cross margin + hedge mode; run `enduro account --setup`")
 
