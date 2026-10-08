@@ -354,7 +354,7 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
     from enduro.agent.prompt import render_prompt
     from enduro.agent.runtime import AgentConfig, AgentRuntime
     from enduro.journal.journal import Journal
-    from enduro.trading.service import TradingService
+    from enduro.trading.service import ChaseSettings, TradingService
 
     market, agent_cfg = settings.market, settings.agent
     if agent_cfg.backend == "api":
@@ -416,7 +416,14 @@ async def _agent(settings: Settings, dry_run: bool, max_ticks: int | None) -> No
                 book = await execution.fetch_top_of_book(symbol)
             return book.best_bid, book.best_ask
 
-        trading = TradingService(gateway, risk, journal, quote, dry_run=dry_run)
+        ex = settings.execution
+        chase = ChaseSettings(
+            open_s=ex.open_chase_s,
+            open_max_stop_share=ex.open_chase_max_stop_share,
+            close_s=ex.close_chase_s,
+            poll_s=ex.chase_poll_s,
+        )
+        trading = TradingService(gateway, risk, journal, quote, dry_run=dry_run, chase=chase)
         prompt = render_prompt(
             agent_cfg.prompt_path,
             risk.limits,

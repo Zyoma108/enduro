@@ -14,7 +14,7 @@ from typing import Any, Literal
 import ccxt.async_support as ccxt
 
 from enduro.data.ccxt_source import is_linear_usdt_perp, with_retries
-from enduro.execution.base import PositionClosed
+from enduro.execution.base import OrderNotOpen, PositionClosed
 from enduro.execution.models import (
     AccountState,
     Balance,
@@ -39,6 +39,8 @@ _MARGIN_MODES = {
 # "Not modified" answers when a setting already has the requested value.
 _ALREADY_SET = ("110025", "110043", "34040")  # position mode, leverage, trading stop
 _ZERO_POSITION = "zero position"  # retCode 10001: "can not set tp/sl/ts for zero position"
+# Amend / cancel of an order that already filled or was cancelled.
+_ORDER_GONE = ("110001", "order not exists", "too late to")
 
 
 class LiveTradingNotAllowed(RuntimeError):
@@ -50,6 +52,8 @@ def order_params(request: OrderRequest) -> dict[str, Any]:
     params: dict[str, Any] = {"positionIdx": POSITION_IDX[request.position_side]}
     if request.action == "close":
         params["reduceOnly"] = True
+    if request.post_only:
+        params["postOnly"] = True
     if request.client_order_id:
         params["clientOrderId"] = request.client_order_id
     # Position-level (tpslMode Full) market stop / take profit, triggered by last price.
@@ -75,6 +79,7 @@ def order_from_ccxt(raw: dict[str, Any]) -> OrderResult:
         avg_price=float(raw["average"]) if raw.get("average") else None,
         fee=float(fee["cost"]) if fee.get("cost") is not None else None,
         ts=raw.get("timestamp"),
+        price=float(raw["price"]) if raw.get("price") else None,
     )
 
 
@@ -131,6 +136,13 @@ def balance_from_ccxt(raw: dict[str, Any]) -> Balance:
 
 def _already_set(error: Exception) -> bool:
     return any(code in str(error) for code in _ALREADY_SET)
+
+
+def _order_gone(error: Exception) -> bool:
+    if isinstance(error, ccxt.OrderNotFound):
+        return True
+    text = str(error).lower()
+    return any(marker.lower() in text for marker in _ORDER_GONE)
 
 
 class BybitGateway:
@@ -315,9 +327,24 @@ class BybitGateway:
                 return order
             await asyncio.sleep(0.3)
 
-    async def cancel_order(self, order_id: str, symbol: str) -> OrderResult:
-        raw = await self._call("cancel order", self._client.cancel_order, order_id, symbol)
-        return order_from_ccxt({**raw, "symbol": raw.get("symbol") or symbol})
+    async def amend_order(self, order_id: str, symbol: str, side: str, price: float) -> None:
+        # Retrying is safe: amending to the same price twice changes nothing.
+        try:
+            await self._call(
+                "amend order", self._client.edit_order, order_id, symbol, "limit", side, None, price
+            )
+        except ccxt.ExchangeError as e:
+            if _order_gone(e):
+                raise OrderNotOpen(order_id) from e
+            raise
+
+    async def cancel_order(self, order_id: str, symbol: str) -> None:
+        try:
+            await self._call("cancel order", self._client.cancel_order, order_id, symbol)
+        except ccxt.ExchangeError as e:
+            if _order_gone(e):
+                raise OrderNotOpen(order_id) from e
+            raise
 
     async def open_orders(self, symbol: str | None = None) -> list[OrderResult]:
         raw = await self._call("open orders", self._client.fetch_open_orders, symbol)

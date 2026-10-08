@@ -61,6 +61,11 @@ class ExecutionConfig(BaseModel):
     environment: Literal["demo", "live"] = "demo"
     # Second, independent switch: live trading is refused unless this is true.
     allow_live: bool = False
+    # Entries and manual closes work a post-only limit order (maker fee) at the touch.
+    open_chase_s: float = Field(default=20.0, gt=0)
+    open_chase_max_stop_share: float = Field(default=0.1, ge=0, le=0.5)
+    close_chase_s: float = Field(default=15.0, ge=0)
+    chase_poll_s: float = Field(default=1.0, gt=0)
 
 
 class RiskConfig(BaseModel):

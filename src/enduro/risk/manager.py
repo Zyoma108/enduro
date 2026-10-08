@@ -51,7 +51,7 @@ class RiskDecision:
     approved: bool
     reasons: tuple[str, ...]  # why it was rejected (empty when approved)
     qty: float = 0.0
-    entry_price: float = 0.0  # expected fill: ask for a long, bid for a short
+    entry_price: float = 0.0  # worst expected fill: the chase bound, or the touch
     notional: float = 0.0
     risk_usd: float = 0.0  # loss if the stop is hit, fees included
     risk_pct: float = 0.0
@@ -143,10 +143,14 @@ class RiskManager:
         bid: float,
         ask: float,
         now_ms: int,
+        worst_entry: float | None = None,
     ) -> RiskDecision:
+        """`worst_entry`: the worst price the entry order may fill at (a chasing limit
+        order's bound); sizing uses it so the stop never risks more than the budget.
+        Without it, a market order is assumed: the ask for a long, the bid for a short."""
         self.observe_equity(equity, now_ms)
         limits, state = self.limits, self.state
-        entry = ask if intent.side == "long" else bid
+        entry = worst_entry or (ask if intent.side == "long" else bid)
         reasons: list[str] = []
 
         def reject(reason: str) -> RiskDecision:

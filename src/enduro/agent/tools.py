@@ -186,7 +186,9 @@ async def open_position(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any
 async def close_position(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
     if rt.focus_symbol is None:
         raise ToolInputError("no focus symbol")
-    return await rt.trading.close(rt.focus_symbol, _side(args), reason=_text(args, "reason"))
+    return await rt.trading.close(
+        rt.focus_symbol, _side(args), reason=_text(args, "reason"), urgent=bool(args.get("urgent"))
+    )
 
 
 async def update_protection(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
@@ -353,10 +355,14 @@ TOOLS: list[Tool] = [
     Tool(
         ToolSpec(
             "open_position",
-            "Open a position on the focus coin at market. The stop loss is mandatory and "
-            "is placed on the exchange with the entry. Size is computed by the risk "
-            "manager from the stop distance (risk_pct defaults to the per-trade maximum; "
-            "you may risk less). The risk manager can reject the trade and will say why.",
+            "Open a position on the focus coin with a post-only limit order (maker fee) "
+            "that follows the best bid (long) / ask (short) for a short while. If price "
+            "runs away past a small bound or the order does not fill in time, it is "
+            "cancelled and nothing opens — you are told why. The stop loss is mandatory "
+            "and is placed on the exchange with the entry; the take profit rests as a "
+            "limit order. Size is computed by the risk manager from the stop distance "
+            "(risk_pct defaults to the per-trade maximum; you may risk less). The risk "
+            "manager can reject the trade and will say why.",
             _schema(
                 {
                     "side": _SIDE,
@@ -373,8 +379,13 @@ TOOLS: list[Tool] = [
     Tool(
         ToolSpec(
             "close_position",
-            "Close the whole position on the focus coin at market.",
-            _schema({"side": _SIDE, "reason": {"type": "string"}}, ["side", "reason"]),
+            "Close the whole position on the focus coin: a post-only limit order at the "
+            "best price for a few seconds (maker fee), then market for whatever is left. "
+            "urgent=true closes at market at once.",
+            _schema(
+                {"side": _SIDE, "reason": {"type": "string"}, "urgent": {"type": "boolean"}},
+                ["side", "reason"],
+            ),
         ),
         close_position,
     ),

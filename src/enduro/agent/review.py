@@ -70,7 +70,7 @@ def trade_context(
         ):
             thesis = r.get("thesis")
     stop = opened["request"].get("stop_loss")
-    take = opened["request"].get("take_profit")
+    take = opened["request"].get("take_profit") or opened.get("take_profit")
     for r in risks:  # protection moved while the position was open
         position = r.get("position") or {}
         if (

@@ -22,6 +22,10 @@ class PositionClosed(Exception):
     in the meantime."""
 
 
+class OrderNotOpen(Exception):
+    """The order to amend or cancel is no longer open (filled or cancelled meanwhile)."""
+
+
 class ExecutionGateway(Protocol):
     environment: str  # "demo" | "live"
 
@@ -59,7 +63,13 @@ class ExecutionGateway(Protocol):
 
     async def fetch_order(self, order_id: str, symbol: str) -> OrderResult: ...
 
-    async def cancel_order(self, order_id: str, symbol: str) -> OrderResult: ...
+    async def amend_order(self, order_id: str, symbol: str, side: str, price: float) -> None:
+        """Move a resting limit order to a new price (raises OrderNotOpen if it is gone)."""
+        ...
+
+    async def cancel_order(self, order_id: str, symbol: str) -> None:
+        """Cancel an open order (raises OrderNotOpen if it is already filled/cancelled)."""
+        ...
 
     async def open_orders(self, symbol: str | None = None) -> list[OrderResult]: ...
 

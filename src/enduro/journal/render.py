@@ -66,15 +66,28 @@ def _order(r: dict[str, Any]) -> str:
         side = intent.get("side") or r.get("side")
         return f"ORDER (dry run) {action} {side} {_short(symbol)}"
     request, result = r.get("request") or {}, r.get("result") or {}
+    chase = r.get("chase") or {}
+    position = f"{request.get('position_side')} {_short(request.get('symbol'))}"
+    if action == "open_cancelled":
+        return (
+            f"ORDER open cancelled {position} · limit chase {chase.get('outcome')} after "
+            f"{chase.get('seconds')} s ({chase.get('orders')} orders), nothing opened"
+        )
     head = (
-        f"ORDER {action} {request.get('position_side')} {_short(request.get('symbol'))}"
+        f"ORDER {action} {position}"
         f" {_num(result.get('filled'))} @ {_num(result.get('avg_price'))}"
         f" · fee {result.get('fee') or 0:.4f}"
     )
     if r.get("gross_pnl_usdt") is not None:
         head += f" · gross PnL {r['gross_pnl_usdt']:+.2f} (entry {_num(r.get('entry_price'))})"
-    if result.get("status") not in (None, "closed"):
+    if result.get("status") not in (None, "closed", "filled"):
         head += f" · status {result.get('status')}"
+    if r.get("urgent"):
+        head += " · at market (urgent)"
+    elif "maker_qty" in r:
+        head += f" · maker {_num(r['maker_qty'])} of {_num(result.get('filled'))}"
+    elif chase:
+        head += f" · maker (limit chase, {chase.get('orders')} orders)"
     return f"{head}\n{_block(r['reason'])}" if r.get("reason") else head
 
 

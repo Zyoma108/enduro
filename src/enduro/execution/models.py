@@ -44,6 +44,7 @@ class OrderRequest:
     qty: float  # base currency
     type: OrderType = "market"
     price: float | None = None  # required for limit orders
+    post_only: bool = False  # limit only: cancelled instead of filling as a taker
     client_order_id: str | None = None
     # Attached to the position on the exchange the moment the order fills (opens only).
     stop_loss: float | None = None
@@ -54,6 +55,8 @@ class OrderRequest:
             raise ValueError("qty must be positive")
         if self.type == "limit" and self.price is None:
             raise ValueError("limit order requires a price")
+        if self.post_only and self.type != "limit":
+            raise ValueError("post-only applies to limit orders")
         if self.action == "close" and (self.stop_loss or self.take_profit):
             raise ValueError("stop loss / take profit can only be attached to an open")
 
@@ -76,6 +79,7 @@ class OrderResult:
     avg_price: float | None
     fee: float | None  # USDT
     ts: int | None
+    price: float | None = None  # limit price (None for market orders)
 
 
 @dataclass(frozen=True, slots=True)

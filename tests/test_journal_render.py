@@ -97,3 +97,26 @@ def test_follow_reads_whole_lines_only(tmp_path):
     with path.open("a") as f:  # the writer finishes the line
         f.write('nd": "tick", "n": 2}\n')
     assert next(records)["n"] == 2
+
+
+def test_render_limit_chase_orders():
+    req = {"symbol": "DOGE/USDT:USDT", "position_side": "long"}
+    cancelled = {
+        "kind": "order",
+        "ts": 0,
+        "action": "open_cancelled",
+        "request": req,
+        "chase": {"outcome": "timeout", "seconds": 20.1, "orders": 3},
+    }
+    assert "open cancelled long DOGE" in format_record(cancelled)
+    assert "timeout after 20.1 s" in format_record(cancelled)
+    opened = {
+        "kind": "order",
+        "ts": 0,
+        "action": "open",
+        "request": req,
+        "result": {"filled": 186.0, "avg_price": 0.0875, "fee": 0.0033, "status": "filled"},
+        "chase": {"outcome": "filled", "orders": 2},
+    }
+    line = format_record(opened)
+    assert "maker (limit chase, 2 orders)" in line and "status" not in line
