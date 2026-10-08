@@ -304,7 +304,9 @@ _TRAIL = {
     "minimum": 0,
     "description": "Trailing stop distance, % of price: once price has moved this far your "
     "way, the stop follows the best price since at this distance (checked every ~10 s, "
-    "only ever tightened). 0 removes the trail; the stop stays where it is.",
+    "only ever tightened). Like a stop it needs room: a trail inside the usual 5m noise "
+    "(under ~2 ATR(5m)) closes good trades on an ordinary pullback. 0 removes the trail; "
+    "the stop stays where it is.",
 }
 
 TOOLS: list[Tool] = [
