@@ -108,6 +108,7 @@ class AgentConfig:
     min_wake_gap_flat_s: int = 60
     min_wake_gap_position_s: int = 15
     min_check_flat_s: int = 120  # no position: scheduled checks no more often than this
+    show_positioning: bool = True  # open interest and funding in the focus view
     notes_in_context: int = 10
     feedback_in_context: int = 15
     radar_rows_in_context: int = 10
@@ -247,10 +248,11 @@ class AgentRuntime:
             "atr_5m_pct": None if atr is None else round(atr * 100, 3),
             **self.radar.liquidity.summary(symbol),
         }
-        if funding := await self._funding(symbol):
-            context["funding"] = funding
-        if open_interest := await self._open_interest(symbol):
-            context["open_interest"] = open_interest
+        if self.config.show_positioning:
+            if funding := await self._funding(symbol):
+                context["funding"] = funding
+            if open_interest := await self._open_interest(symbol):
+                context["open_interest"] = open_interest
         snap = self.tracker.snapshot(symbol, now_ms())
         if snap is None:
             return {"symbol": symbol, "status": "waiting for the first live data", **context}

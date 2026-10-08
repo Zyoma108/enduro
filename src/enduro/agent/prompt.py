@@ -11,6 +11,8 @@ from string import Template
 
 from enduro.risk.manager import RiskLimits
 
+POSITIONING_FILE = "positioning.md"  # next to the main prompt
+
 ENVIRONMENT_NOTES = {
     "demo": (
         "Ты торгуешь на демо-счёте: деньги виртуальные, но относись к ним как к настоящим —\n"
@@ -26,9 +28,18 @@ def render_prompt(
     taker_fee_bps: float,
     environment: str,
     min_check_flat_s: int = 120,
+    positioning: bool = True,
 ) -> str:
+    """`positioning`: include prompts/positioning.md (open interest and funding) at
+    `$positioning` — only when the focus view shows that data."""
+
     def fmt(x: float) -> str:
         return f"{x:g}"
+
+    fragment = path.with_name(POSITIONING_FILE)
+    positioning_text = (
+        "\n" + fragment.read_text(encoding="utf-8").rstrip("\n") if positioning else ""
+    )
 
     return Template(path.read_text(encoding="utf-8")).substitute(
         risk_per_trade_pct=fmt(limits.risk_per_trade_pct),
@@ -40,4 +51,5 @@ def render_prompt(
         taker_fee_pct=fmt(taker_fee_bps / 100),
         environment_note=ENVIRONMENT_NOTES[environment],
         min_check_flat_s=min_check_flat_s,
+        positioning=positioning_text,
     )

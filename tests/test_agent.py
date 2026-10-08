@@ -844,3 +844,25 @@ async def test_notes_from_an_earlier_session_are_not_shown(tmp_path):
     await rt.tick("start")
     first_user = llm.log[0][1]
     assert "old rule from yesterday" not in first_user and "(none yet)" in first_user
+
+
+def test_prompt_includes_positioning_only_when_enabled():
+    with_data = render_prompt(Path("prompts/trader.md"), RiskLimits(), 5.5, "demo")
+    without = render_prompt(Path("prompts/trader.md"), RiskLimits(), 5.5, "demo", positioning=False)
+    assert "`open_interest`" in with_data and "`funding`" in with_data
+    assert "open_interest" not in without and "funding" not in without
+    assert "$" not in without and "стены на пути к цели.\n\n" in without
+
+
+async def test_focus_view_hides_positioning_when_disabled(tmp_path):
+    rt, *_ = runtime(tmp_path, ScriptedLLM([]), AgentConfig(show_positioning=False))
+    calls = []
+
+    async def spy(symbol):
+        calls.append(symbol)
+        return {"x": 1}
+
+    rt._funding = rt._open_interest = spy
+    rt.focus_symbol = "SOL/USDT:USDT"
+    view = await rt.focus_view()
+    assert "funding" not in view and "open_interest" not in view and calls == []

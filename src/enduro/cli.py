@@ -468,6 +468,7 @@ async def _agent(
             settings.scanner.taker_fee_bps,
             settings.execution.environment,
             min_check_flat_s=agent_cfg.min_check_flat_s,
+            positioning=agent_cfg.show_positioning,
         )
         runtime = AgentRuntime(
             llm=llm,
@@ -490,6 +491,7 @@ async def _agent(
                 min_wake_gap_flat_s=agent_cfg.min_wake_gap_flat_s,
                 min_wake_gap_position_s=agent_cfg.min_wake_gap_position_s,
                 min_check_flat_s=agent_cfg.min_check_flat_s,
+                show_positioning=agent_cfg.show_positioning,
             ),
             universe=symbols,
             reference=market.reference_exchange,
@@ -512,6 +514,7 @@ async def _agent(
             dry_run=dry_run,
             environment=settings.execution.environment,
             universe=len(symbols),
+            show_positioning=agent_cfg.show_positioning,
         )
         try:
             await runtime.run(max_ticks)

@@ -137,6 +137,8 @@ class AgentSettings(BaseModel):
     min_wake_gap_flat_s: int = Field(default=60, ge=0)
     min_wake_gap_position_s: int = Field(default=15, ge=0)
     min_check_flat_s: int = Field(default=120, ge=15)
+    # Open interest and funding in the focus view and the prompt (prompts/positioning.md).
+    show_positioning: bool = True
 
 
 class ApiKey(BaseModel):
