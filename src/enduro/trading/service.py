@@ -22,7 +22,7 @@ import asyncio
 import logging
 import math
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from enduro.core.models import now_ms
@@ -56,6 +56,7 @@ class ChaseResult:
     reprices: int = 0
     outcome: str = "timeout"  # filled | timeout | ran_away | error
     error: str | None = None
+    order_ids: list[str] = field(default_factory=list)  # exchange ids of every order placed
 
     @property
     def avg_price(self) -> float | None:
@@ -306,6 +307,7 @@ class TradingService:
         if rest is not None:
             request = OrderRequest(symbol, side, "close", rest.size, client_order_id=f"{tag}m")
             placed = await self.gateway.place_order(request)
+            chase.order_ids.append(placed.id)
             market_fill = await self.gateway.wait_for_fill(placed.id, symbol)
             chase.filled += market_fill.filled
             chase.cost += market_fill.filled * (market_fill.avg_price or 0.0)
@@ -324,6 +326,9 @@ class TradingService:
             request=replace(limit, type="market", price=None, post_only=False) if urgent else limit,
             result={
                 "id": tag,
+                # The exchange books the close under one of these: the trade sync matches
+                # its closing order id against them to tell our exits from stops.
+                "order_ids": chase.order_ids,
                 "status": "closed" if left is None else "partially closed",
                 "qty": position.size,
                 "filled": chase.filled,
@@ -470,6 +475,7 @@ class TradingService:
                         )
                     )
                     order_id, order_price = placed.id, price
+                    result.order_ids.append(placed.id)
                 elif price != order_price:
                     try:
                         await self.gateway.amend_order(

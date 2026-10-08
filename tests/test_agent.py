@@ -655,7 +655,13 @@ async def test_closed_trades_carry_thesis_exit_reason_and_hindsight(tmp_path):
             "take_profit": 103.0,
         },
     )
-    journal.write("order", action="close", result={"id": "c-9"}, reason="back under the level")
+    # A chased close: our client tag, plus the exchange ids of every order it placed.
+    journal.write(
+        "order",
+        action="close",
+        result={"id": "enduro-1-c", "order_ids": ["c-8", "c-9"]},
+        reason="back under the level",
+    )
 
     await rt.tick("start")
     await rt.tick("scheduled")

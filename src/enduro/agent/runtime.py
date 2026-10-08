@@ -601,7 +601,13 @@ class AgentRuntime:
             }
         orders = self.journal.recent("order", 1000)
         closes = {
-            (r.get("result") or {}).get("id"): r for r in orders if r.get("action") == "close"
+            order_id: r
+            for r in orders
+            if r.get("action") == "close"
+            for order_id in [
+                (r.get("result") or {}).get("id"),
+                *((r.get("result") or {}).get("order_ids") or []),
+            ]
         }
         horizon = now_ms() - CLOSED_TRADES_HORIZON_MS
         for t in reversed(trades):  # oldest first, so the journal reads in order

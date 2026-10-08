@@ -198,11 +198,13 @@ async def test_unfilled_entry_times_out(tmp_path):
 
 async def test_close_cancels_take_profit_then_finishes_at_market(tmp_path):
     ex = Exchange([(100.0, 100.02)], fill_on_fetch=1)
-    svc, _ = service(tmp_path, ex)
+    svc, journal = service(tmp_path, ex)
     await svc.open(OpenIntent(SYMBOL, "long", stop_loss=99.0, take_profit=102.0), "x")
     ex.fill_on_fetch = None  # the closing limit never fills
     result = await svc.close(SYMBOL, "long", reason="thesis broken")
     assert result["closed"] is True and result["maker_qty"] == 0
+    close = next(r for r in journal.recent("order", 5) if r["action"] == "close")
+    assert len(close["result"]["order_ids"]) >= 2  # the chase order(s) and the market rest
     assert result["market_qty"] == pytest.approx(ex.placed[1].qty)
     assert not [o for o in await ex.open_orders() if o.client_order_id.endswith("-tp")]
     assert ex.placed[-1].type == "market" and ex.placed[-2].post_only
