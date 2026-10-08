@@ -529,8 +529,12 @@ class TradingService:
         try:
             existing = await self._take_profit_orders(symbol, side)
             if existing and existing[0].qty == qty:
-                closing = "sell" if side == "long" else "buy"
-                await self.gateway.amend_order(existing[0].id, symbol, closing, price)
+                tick = (await self.gateway.instrument_rules(symbol)).price_tick
+                # Bybit rejects an amend that changes nothing (the agent often repeats
+                # the take profit while moving only the stop).
+                if existing[0].price is None or abs(existing[0].price - price) >= tick / 2:
+                    closing = "sell" if side == "long" else "buy"
+                    await self.gateway.amend_order(existing[0].id, symbol, closing, price)
                 for extra in existing[1:]:
                     await self.gateway.cancel_order(extra.id, symbol)
                 return None

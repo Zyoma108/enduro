@@ -248,3 +248,12 @@ async def test_rejected_post_only_is_placed_again_a_tick_behind(tmp_path):
     result = await svc.open(OpenIntent(SYMBOL, "long", stop_loss=99.0), "x")
     assert result["opened"] is True
     assert [r.price for r in ex.placed[:2]] == [100.0, 99.99]
+
+
+async def test_repeating_the_same_take_profit_does_not_amend(tmp_path):
+    ex = Exchange([(100.0, 100.02)], fill_on_fetch=1)
+    svc, _ = service(tmp_path, ex)
+    await svc.open(OpenIntent(SYMBOL, "long", stop_loss=99.0, take_profit=102.0), "x")
+    result = await svc.protect(SYMBOL, "long", stop_loss=99.5, take_profit=102.0)
+    assert result["updated"] is True and "take_profit_error" not in result
+    assert ex.amends[-1:] != [102.0]  # no amend to the price it already has
