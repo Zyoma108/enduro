@@ -62,6 +62,15 @@ class Journal:
             return []
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
+    def read_kinds(self, kinds: set[str]) -> list[dict[str, Any]]:
+        """Records of the given kinds from every day, oldest first."""
+        out = []
+        for path in sorted(self.root.glob("*.jsonl")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line and json.loads(line)["kind"] in kinds:
+                    out.append(json.loads(line))
+        return out
+
     def recent(self, kind: str, limit: int, since_ms: int = 0) -> list[dict[str, Any]]:
         """Most recent records of `kind` from today and yesterday (and not older than
         `since_ms`), oldest first."""

@@ -31,7 +31,14 @@ from enduro.agent.llm import (
     ToolResult,
     UsageLimitError,
 )
-from enduro.agent.review import HOLD_CHECK_MIN, TradeContext, review_trade, trade_context
+from enduro.agent.review import (
+    HOLD_CHECK_MIN,
+    TRACK_RECORD_KINDS,
+    TradeContext,
+    review_trade,
+    track_record,
+    trade_context,
+)
 from enduro.agent.tools import TOOLS, TOOLS_BY_NAME, ToolInputError, to_json
 from enduro.analytics.focus import HISTORY_MS, FocusTracker
 from enduro.analytics.impulse import RANGE_MIN, Impulse, detect_impulse, market_context
@@ -193,6 +200,7 @@ class AgentRuntime:
         # Tick limit reached with a position open: keep managing it, no new entries.
         self.wind_down = False
         self._known_closed: set[str] | None = None  # closing order ids already journaled
+        self._track_record: tuple[int, dict[str, Any]] | None = None  # (closes seen, stats)
 
     # ------------------------------------------------------------ views for tools
 
@@ -752,6 +760,18 @@ class AgentRuntime:
             summaries.append(summary)
         return summaries
 
+    def track_record(self) -> dict[str, Any]:
+        """Recomputed from the whole journal only when a new close was journaled."""
+        seen = len(self._known_closed or ())
+        if self._track_record is None or self._track_record[0] != seen:
+            try:
+                stats = track_record(self.journal.read_kinds(TRACK_RECORD_KINDS))
+            except Exception:
+                log.warning("cannot compute the track record", exc_info=True)
+                stats = {}
+            self._track_record = (seen, stats)
+        return self._track_record[1]
+
     async def _trade_hindsight(
         self, trade: ClosedTrade, context: TradeContext, by_agent: bool
     ) -> dict[str, Any] | None:
@@ -820,6 +840,13 @@ class AgentRuntime:
             "## Account and risk",
             json.dumps(account, ensure_ascii=False),
         ]
+        if record := self.track_record():
+            parts += [
+                "",
+                "## Your track record (all your closed trades in this journal; R = net PnL / "
+                "risk at entry; by side and by stop distance at entry in ATR(5m))",
+                json.dumps(record, ensure_ascii=False),
+            ]
         if closed:
             parts += [
                 "",

@@ -121,3 +121,42 @@ def test_trade_context_finds_open_thesis_and_moved_stop():
         opened_ms=T0 + 5, thesis="breakout of 99.5", stop=99.0, take=105.0
     )
     assert trade_context(trade, [], risks) == TradeContext()
+
+
+def test_track_record_by_side_and_stop_width():
+    from enduro.agent.review import track_record
+
+    def opened(symbol, side, risk, atr):
+        return [
+            {
+                "kind": "order",
+                "action": "open",
+                "plan": {"risk_usdt": risk},
+                "result": {"id": "x"},
+                "request": {"symbol": symbol, "position_side": side},
+            },
+            {
+                "kind": "tool",
+                "name": "open_position",
+                "result": {"avg_price": 1.0, "stop_distance_in_atr_5m": atr},
+            },
+        ]
+
+    def closed(symbol, side, pnl):
+        return [{"kind": "closed", "trade": {"symbol": symbol, "side": side, "pnl": pnl}}]
+
+    records = (
+        opened("A", "long", 10, 2.0)
+        + closed("A", "long", 20)
+        + opened("B", "short", 10, 1.0)
+        + closed("B", "short", -10)
+        + opened("C", "short", 5, 1.2)
+        + closed("C", "short", -2.5)
+        + closed("D", "long", 5)  # no open in the journal: skipped
+    )
+    record = track_record(records)
+    assert record["all"] == {"trades": 3, "win_rate": 0.33, "avg_r": 0.17, "sum_r": 0.5}
+    assert record["short"]["sum_r"] == -1.5 and record["long"]["win_rate"] == 1.0
+    assert record["stop_under_1.5_atr"]["trades"] == 2
+    assert record["stop_1.5_atr_or_more"]["avg_r"] == 2.0
+    assert track_record([]) == {}

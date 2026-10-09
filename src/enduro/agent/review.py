@@ -154,3 +154,50 @@ def _if_held(
     if now_ms < horizon:
         return "neither stop nor take profit hit yet"
     return f"neither stop nor take profit hit within {HOLD_CHECK_MIN} min"
+
+
+TRACK_RECORD_KINDS = {"order", "tool", "closed"}
+STOP_ATR_SPLIT = 1.5
+
+
+def _stats(rs: Sequence[float]) -> dict[str, Any]:
+    return {
+        "trades": len(rs),
+        "win_rate": round(sum(r > 0 for r in rs) / len(rs), 2),
+        "avg_r": round(sum(rs) / len(rs), 2),
+        "sum_r": round(sum(rs), 2),
+    }
+
+
+def track_record(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """The agent's own closed trades from the journal, in R (net PnL / risk at entry), by
+    side and by how far the stop was from the entry in ATR(5m)."""
+    opens: dict[tuple[str, str], list[Any]] = {}  # (symbol, side) -> [risk, stop in ATR]
+    last: tuple[str, str] | None = None
+    trades: list[tuple[str, float | None, float]] = []
+    for r in records:
+        if r["kind"] == "order" and r.get("action") == "open" and r.get("plan") and r.get("result"):
+            last = (r["request"]["symbol"], r["request"]["position_side"])
+            opens[last] = [r["plan"]["risk_usdt"], None]
+        elif r["kind"] == "tool" and r.get("name") == "open_position" and last in opens:
+            result = r.get("result")
+            if isinstance(result, dict) and result.get("avg_price"):
+                opens[last][1] = result.get("stop_distance_in_atr_5m")
+        elif r["kind"] == "closed":
+            t = r["trade"]
+            opened = opens.pop((t["symbol"], t["side"]), None)
+            if opened and opened[0]:
+                trades.append((t["side"], opened[1], t["pnl"] / opened[0]))
+    if not trades:
+        return {}
+    out: dict[str, Any] = {"all": _stats([r for _, _, r in trades])}
+    for side in ("long", "short"):
+        if rs := [r for s, _, r in trades if s == side]:
+            out[side] = _stats(rs)
+    for name, keep in (
+        (f"stop_under_{STOP_ATR_SPLIT:g}_atr", lambda a: a < STOP_ATR_SPLIT),
+        (f"stop_{STOP_ATR_SPLIT:g}_atr_or_more", lambda a: a >= STOP_ATR_SPLIT),
+    ):
+        if rs := [r for _, a, r in trades if a is not None and keep(a)]:
+            out[name] = _stats(rs)
+    return out
