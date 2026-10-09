@@ -143,6 +143,8 @@ class AgentSettings(BaseModel):
     # volume of the day (0 turns it off), at most once per coin and direction per cooldown.
     impulse_volume_vs_24h: float = Field(default=10.0, ge=0)
     impulse_cooldown_min: int = Field(default=60, ge=1)
+    # open_position refuses a stop nearer than this many ATR(5m) to the price (0 = off).
+    min_stop_atr: float = Field(default=1.5, ge=0)
 
 
 class ApiKey(BaseModel):

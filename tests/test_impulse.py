@@ -88,3 +88,25 @@ async def test_trail_of_a_closed_position_is_dropped_at_the_next_tick(tmp_path):
     rt.set_trail("SOL/USDT:USDT", "long", 0.01)
     await rt._situation("search", "scheduled")
     assert rt.trails == {}
+
+
+async def test_a_stop_inside_the_5m_noise_is_refused(tmp_path):
+    from test_agent import FakeRow, call, turn
+
+    llm = ScriptedLLM(
+        [
+            [
+                turn(call("set_focus", symbol="ETH/USDT:USDT", reason="x")),
+                turn(call("open_position", side="long", stop_loss=99.0, thesis="t")),
+                turn(call("open_position", side="long", stop_loss=98.0, thesis="t")),
+                turn(call("finish_tick", next_check_seconds=60, note="n")),
+            ]
+        ]
+    )
+    rt, trading, *_ = runtime(tmp_path, llm)
+    rt.radar.rows = [FakeRow("ETH/USDT:USDT", atr_5m=0.01)]
+    rt.radar.rows[0].price = 100.0
+    await rt.tick("start")
+    results = [r[0] for kind, r in llm.log if kind == "results"]
+    assert results[1].is_error and "1.00 ATR(5m)" in results[1].content
+    assert not results[2].is_error and len(trading.opened) == 1

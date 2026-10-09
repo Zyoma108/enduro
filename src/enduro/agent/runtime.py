@@ -118,6 +118,7 @@ class AgentConfig:
     # many times the coin's average volume of the day; 0 turns it off.
     impulse_volume_vs_24h: float = 10.0
     impulse_cooldown_min: int = 60  # per coin and direction
+    min_stop_atr: float = 1.5  # open_position refuses stops nearer than this (0 = off)
     notes_in_context: int = 10
     feedback_in_context: int = 15
     radar_rows_in_context: int = 10
@@ -218,6 +219,14 @@ class AgentRuntime:
 
     def radar_row(self, symbol: str) -> RadarRow | None:
         return next((r for r in self.radar.rows if r.symbol == symbol), None)
+
+    def last_price(self, symbol: str) -> float | None:
+        """Mid on the execution exchange if streaming, else the radar's last close."""
+        book = self.tracker.latest_book(self.execution, symbol)
+        if book and book.mid:
+            return book.mid
+        row = self.radar_row(symbol)
+        return getattr(row, "price", None)
 
     def atr_5m(self, symbol: str) -> float | None:
         row = self.radar_row(symbol)

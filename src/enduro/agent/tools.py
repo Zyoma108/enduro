@@ -176,6 +176,7 @@ async def open_position(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any
             "open position"
         )
     risk_pct = _num(args, "risk_pct", required=False)
+    _check_stop_room(rt, rt.focus_symbol, _num(args, "stop_loss"))
     intent = OpenIntent(
         symbol=rt.focus_symbol,
         side=_side(args),
@@ -195,6 +196,24 @@ async def open_position(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any
         if (atr := rt.atr_5m(intent.symbol)) and atr > 0:
             result["stop_distance_in_atr_5m"] = round(distance / atr, 2)
     return result
+
+
+def _check_stop_room(rt: AgentRuntime, symbol: str, stop: float) -> None:
+    """Refuse stops inside the usual 5m noise: the agent's trades with stops under
+    1.5 ATR(5m) lost -0.2R on average (2026-10-01..09), wider ones made money."""
+    minimum = rt.config.min_stop_atr
+    price, atr = rt.last_price(symbol), rt.atr_5m(symbol)
+    if not (minimum > 0 and price and atr):
+        return
+    distance = abs(price - stop) / price
+    if distance < minimum * atr:
+        raise ToolInputError(
+            f"the stop is {distance * 100:.2f}% from the price, {distance / atr:.2f} ATR(5m); "
+            f"the minimum is {minimum:g} ATR(5m) ({minimum * atr * 100:.2f}%) — a stop inside "
+            "the usual 5m noise gets taken out by it. Put the stop behind a level at least "
+            "that far (the risk manager shrinks the size, the dollar risk stays the same) "
+            "or skip the trade"
+        )
 
 
 async def close_position(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:

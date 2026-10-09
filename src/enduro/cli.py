@@ -494,6 +494,7 @@ async def _agent(
                 show_positioning=agent_cfg.show_positioning,
                 impulse_volume_vs_24h=agent_cfg.impulse_volume_vs_24h,
                 impulse_cooldown_min=agent_cfg.impulse_cooldown_min,
+                min_stop_atr=agent_cfg.min_stop_atr,
             ),
             universe=symbols,
             reference=market.reference_exchange,
