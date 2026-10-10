@@ -97,7 +97,7 @@ min_wake_gap_flat_s = 60
 min_wake_gap_position_s = 15
 # Без открытой позиции (поиск и фокус) плановые проверки не чаще чем раз в столько секунд,
 # даже если агент просит раньше. Резкое движение всё равно разбудит его.
-min_check_flat_s = 300
+min_check_flat_s = 120
 # Открытый интерес и funding в фокусе и в промпте (prompts/positioning.md).
 # Выключено для эксперимента (2026-10-08): модели строили на них нарратив
 # («закрытие шортов», «топливо сквиза») вместо структуры и потока.
@@ -128,7 +128,7 @@ backend = "openai"
 base_url = "https://api.deepseek.com"
 model = "deepseek-v4-pro"
 credentials = "deepseek"
-effort = "high"            # reasoning_effort: low | high | max
+effort = "max"             # reasoning_effort: low | high | max
 extra_body = { thinking = { type = "enabled" } }
 price_per_mtok = { input = 1.32, output = 3.96, cache_read = 0.044 }
 
