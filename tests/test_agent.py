@@ -262,7 +262,7 @@ def test_tool_schemas_are_valid_and_strict():
 def test_prompt_renders_live_limits():
     limits = RiskLimits(risk_per_trade_pct=0.5, daily_loss_limit_pct=3.0)
     text = render_prompt(Path("prompts/trader.md"), limits, 5.5, "demo")
-    assert "до 0.5% капитала" in text and "дневной убыток 3%" in text
+    assert "0.5% капитала" in text and "дневной убыток 3%" in text
     assert "0.055%" in text and "демо-счёте" in text
     assert "$" not in text.replace("$risk", "")  # every placeholder substituted
 

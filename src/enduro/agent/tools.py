@@ -413,7 +413,7 @@ TOOLS: list[Tool] = [
             "cancelled and nothing opens — you are told why. The stop loss is mandatory "
             "and is placed on the exchange with the entry; the take profit rests as a "
             "limit order. Size is computed by the risk manager from the stop distance "
-            "(risk_pct defaults to the per-trade maximum; you may risk less). The risk "
+            "(risk_pct defaults to the per-trade maximum). The risk "
             "manager can reject the trade and will say why.",
             _schema(
                 {
