@@ -137,7 +137,7 @@ backend = "openai"
 # Эндпоинт GLM Coding Plan: ключ пользователя — подписка, на обычном API баланса нет
 # (429, код 1113). Цены ниже — тарифы API, для оценки; по подписке поштучно не платим.
 base_url = "https://api.z.ai/api/coding/paas/v4"
-model = "glm-5"
+model = "glm-5.3"         # Coding Plan отдаёт glm-5.3 на любой запрос glm-5.x
 credentials = "glm"
 extra_body = { thinking = { type = "enabled" } }
 price_per_mtok = { input = 1.00, output = 3.20, cache_read = 0.20 }
