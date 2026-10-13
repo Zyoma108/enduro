@@ -139,5 +139,6 @@ backend = "openai"
 base_url = "https://api.z.ai/api/coding/paas/v4"
 model = "glm-5.3"         # Coding Plan отдаёт glm-5.3 на любой запрос glm-5.x
 credentials = "glm"
-extra_body = { thinking = { type = "enabled" } }
+# Без рассуждения: на Lite-тарифе ~40 токенов/с, с thinking тик шёл 7–12 минут (2026-10-13).
+extra_body = { thinking = { type = "disabled" } }
 price_per_mtok = { input = 1.00, output = 3.20, cache_read = 0.20 }
