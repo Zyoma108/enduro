@@ -160,3 +160,43 @@ def test_track_record_by_side_and_stop_width():
     assert record["stop_under_1.5_atr"]["trades"] == 2
     assert record["stop_1.5_atr_or_more"]["avg_r"] == 2.0
     assert track_record([]) == {}
+
+
+def test_track_record_by_market_at_entry():
+    from enduro.agent.review import track_record
+
+    def trade(order_id, side, pnl, share_up=None):
+        result = {"avg_price": 1.0}
+        if share_up is not None:
+            result["market_1h_share_up"] = share_up
+        return [
+            {
+                "kind": "order",
+                "action": "open",
+                "plan": {"risk_usdt": 10},
+                "result": {"id": order_id},
+                "request": {"symbol": "A", "position_side": side},
+            },
+            {"kind": "tool", "name": "open_position", "result": result},
+            {"kind": "closed", "trade": {"symbol": "A", "side": side, "pnl": pnl}},
+        ]
+
+    records = (
+        trade("o1", "long", 20, share_up=0.8)
+        + trade("o2", "long", -10, share_up=0.2)
+        + trade("o3", "long", -5)  # reconstructed below
+        + trade("o4", "short", -10, share_up=0.5)
+        + trade("o5", "short", -10)  # market unknown: only in the side totals
+        + [{"kind": "entry_market", "order_id": "o3", "market_1h_share_up": 0.3}]
+    )
+    record = track_record(records)
+    assert record["long_market_1h_up"]["sum_r"] == 2.0
+    assert record["long_market_1h_down"] == {
+        "trades": 2,
+        "win_rate": 0.0,
+        "avg_r": -0.75,
+        "sum_r": -1.5,
+    }
+    assert record["short_market_1h_mixed"]["trades"] == 1
+    assert record["short"]["trades"] == 2
+    assert "short_market_1h_down" not in record

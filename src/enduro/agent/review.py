@@ -156,8 +156,16 @@ def _if_held(
     return f"neither stop nor take profit hit within {HOLD_CHECK_MIN} min"
 
 
-TRACK_RECORD_KINDS = {"order", "tool", "closed"}
+TRACK_RECORD_KINDS = {"order", "tool", "closed", "entry_market"}
 STOP_ATR_SPLIT = 1.5
+# Market at entry: share of the universe up over the last hour.
+MARKET_UP, MARKET_DOWN = 0.6, 0.4
+
+
+def _market(share_up: float | None) -> str | None:
+    if share_up is None:
+        return None
+    return "up" if share_up >= MARKET_UP else "down" if share_up <= MARKET_DOWN else "mixed"
 
 
 def _stats(rs: Sequence[float]) -> dict[str, Any]:
@@ -171,33 +179,44 @@ def _stats(rs: Sequence[float]) -> dict[str, Any]:
 
 def track_record(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """The agent's own closed trades from the journal, in R (net PnL / risk at entry), by
-    side and by how far the stop was from the entry in ATR(5m)."""
-    opens: dict[tuple[str, str], list[Any]] = {}  # (symbol, side) -> [risk, stop in ATR]
+    side, by how far the stop was from the entry in ATR(5m), and by side and where the
+    market went over the hour before the entry. Trades from before the market was journaled
+    at entry get it from `entry_market` records (reconstructed from candles)."""
+    backfill = {
+        r["order_id"]: r.get("market_1h_share_up") for r in records if r["kind"] == "entry_market"
+    }
+    # (symbol, side) -> [risk, stop in ATR, market 1h share up]
+    opens: dict[tuple[str, str], list[Any]] = {}
     last: tuple[str, str] | None = None
-    trades: list[tuple[str, float | None, float]] = []
+    trades: list[tuple[str, float | None, str | None, float]] = []
     for r in records:
         if r["kind"] == "order" and r.get("action") == "open" and r.get("plan") and r.get("result"):
             last = (r["request"]["symbol"], r["request"]["position_side"])
-            opens[last] = [r["plan"]["risk_usdt"], None]
+            opens[last] = [r["plan"]["risk_usdt"], None, backfill.get(r["result"].get("id"))]
         elif r["kind"] == "tool" and r.get("name") == "open_position" and last in opens:
             result = r.get("result")
             if isinstance(result, dict) and result.get("avg_price"):
                 opens[last][1] = result.get("stop_distance_in_atr_5m")
+                if (share := result.get("market_1h_share_up")) is not None:
+                    opens[last][2] = share
         elif r["kind"] == "closed":
             t = r["trade"]
             opened = opens.pop((t["symbol"], t["side"]), None)
             if opened and opened[0]:
-                trades.append((t["side"], opened[1], t["pnl"] / opened[0]))
+                trades.append((t["side"], opened[1], _market(opened[2]), t["pnl"] / opened[0]))
     if not trades:
         return {}
-    out: dict[str, Any] = {"all": _stats([r for _, _, r in trades])}
+    out: dict[str, Any] = {"all": _stats([r for *_, r in trades])}
     for side in ("long", "short"):
-        if rs := [r for s, _, r in trades if s == side]:
+        if rs := [r for s, _, _, r in trades if s == side]:
             out[side] = _stats(rs)
+        for market in ("up", "mixed", "down"):
+            if rs := [r for s, _, m, r in trades if s == side and m == market]:
+                out[f"{side}_market_1h_{market}"] = _stats(rs)
     for name, keep in (
         (f"stop_under_{STOP_ATR_SPLIT:g}_atr", lambda a: a < STOP_ATR_SPLIT),
         (f"stop_{STOP_ATR_SPLIT:g}_atr_or_more", lambda a: a >= STOP_ATR_SPLIT),
     ):
-        if rs := [r for _, a, r in trades if a is not None and keep(a)]:
+        if rs := [r for _, a, _, r in trades if a is not None and keep(a)]:
             out[name] = _stats(rs)
     return out

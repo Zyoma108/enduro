@@ -7,6 +7,7 @@ reason, so the model can correct itself instead of the tick failing.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from enduro.risk.manager import OpenIntent
 
 if TYPE_CHECKING:
     from enduro.agent.runtime import AgentRuntime
+
+log = logging.getLogger(__name__)
 
 MIN_CHECK_S, MAX_CHECK_S = 15, 600
 HISTORY_INTERVALS = {"1m": 1, "5m": 5, "15m": 15, "1h": 60}
@@ -195,6 +198,13 @@ async def open_position(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any
         result["stop_distance_pct"] = round(distance * 100, 3)
         if (atr := rt.atr_5m(intent.symbol)) and atr > 0:
             result["stop_distance_in_atr_5m"] = round(distance / atr, 2)
+    if result.get("avg_price"):
+        try:  # for the track record; the position is open whatever happens here
+            share_up = rt.market_view()["universe"]["1h"]["share_up"]
+        except Exception:
+            log.warning("market at entry unavailable", exc_info=True)
+        else:
+            result["market_1h_share_up"] = share_up
     return result
 
 

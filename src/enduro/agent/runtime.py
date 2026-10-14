@@ -33,6 +33,8 @@ from enduro.agent.llm import (
 )
 from enduro.agent.review import (
     HOLD_CHECK_MIN,
+    MARKET_DOWN,
+    MARKET_UP,
     TRACK_RECORD_KINDS,
     TradeContext,
     review_trade,
@@ -844,7 +846,9 @@ class AgentRuntime:
             parts += [
                 "",
                 "## Your track record (all your closed trades in this journal; R = net PnL / "
-                "risk at entry; by side and by stop distance at entry in ATR(5m))",
+                "risk at entry; by side, by side and the market over the hour before entry "
+                f"(share of coins up: up ≥ {MARKET_UP:g}, down ≤ {MARKET_DOWN:g}), and by stop "
+                "distance at entry in ATR(5m))",
                 json.dumps(record, ensure_ascii=False),
             ]
         if closed:
