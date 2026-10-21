@@ -9,7 +9,7 @@ import pytest
 from enduro.agent.llm import LLMTurn, ToolCall, ToolResult, Usage, UsageLimitError
 from enduro.agent.prompt import render_prompt
 from enduro.agent.runtime import AgentConfig, AgentRuntime, wake_threshold_bps
-from enduro.agent.tools import TOOLS
+from enduro.agent.tools import TOOLS, ToolInputError
 from enduro.analytics.focus import FocusTracker
 from enduro.analytics.liquidity import Liquidity, LiquidityBook, liquidity_from_book
 from enduro.core.models import Candle, OrderBook, Trade, now_ms
@@ -244,6 +244,45 @@ async def test_release_focus_requires_flat_position(tmp_path):
     result = next(r[0] for kind, r in llm.log if kind == "results")
     assert result.is_error and "close the open position" in result.content
     assert rt.focus_symbol == "SOL/USDT:USDT"
+
+
+async def test_switching_focus_parks_a_position_only_while_the_limit_has_room(tmp_path):
+    rt, trading, *_ = runtime(tmp_path, ScriptedLLM([]), AgentConfig(max_positions=1))
+    await rt.set_focus("SOL/USDT:USDT", "test")
+    trading.positions = [{"symbol": "SOL/USDT:USDT", "side": "long"}]
+    with pytest.raises(ToolInputError, match="limit 1"):
+        await rt.set_focus("ETH/USDT:USDT", "fresh impulse")
+
+    rt.config = AgentConfig(max_positions=2)
+    await rt.set_focus("ETH/USDT:USDT", "fresh impulse")
+    assert rt.focus_symbol == "ETH/USDT:USDT" and rt._held == {"SOL/USDT:USDT"}
+    situation = await rt._situation("focus", "scheduled")
+    assert "Parked positions (outside the focus): SOL/USDT:USDT" in situation
+
+
+async def test_parked_position_is_managed_by_symbol_and_its_close_wakes_the_agent(tmp_path):
+    rt, trading, _, _ = runtime(tmp_path, ScriptedLLM([]), AgentConfig(max_positions=2))
+    trading.positions = [{"symbol": "SOL/USDT:USDT", "side": "long"}]
+    await rt.set_focus("ETH/USDT:USDT", "x")
+    await rt._remember_market_state()
+    assert rt._held == {"SOL/USDT:USDT"} and not rt._had_position
+
+    closes = []
+
+    async def close(symbol, side, reason, urgent):
+        closes.append(symbol)
+        return {"closed": True}
+
+    trading.close = close
+    tool = {t.spec.name: t for t in TOOLS}["close_position"]
+    await tool.handler(rt, {"side": "long", "reason": "r", "symbol": "SOL/USDT:USDT"})
+    assert closes == ["SOL/USDT:USDT"]
+    with pytest.raises(ToolInputError, match="no open position on BTC"):
+        await tool.handler(rt, {"side": "long", "reason": "r", "symbol": "BTC/USDT:USDT"})
+
+    trading.positions = []  # the exchange closed it
+    await rt._watch_once(polls=5)
+    assert rt._wake.is_set() and "SOL/USDT:USDT" in rt._wake_reason
 
 
 def test_tool_schemas_are_valid_and_strict():

@@ -495,6 +495,7 @@ async def _agent(
                 impulse_volume_vs_24h=agent_cfg.impulse_volume_vs_24h,
                 impulse_cooldown_min=agent_cfg.impulse_cooldown_min,
                 min_stop_atr=agent_cfg.min_stop_atr,
+                max_positions=risk.limits.max_open_positions,
             ),
             universe=symbols,
             reference=market.reference_exchange,
@@ -505,7 +506,7 @@ async def _agent(
         open_positions = await gateway.positions()
         if open_positions:
             held = open_positions[0].symbol
-            runtime.universe.add(held)
+            runtime.universe.update(p.symbol for p in open_positions)
             await runtime.set_focus(held, "position already open at start: manage it")
             log.warning("open position on %s at start: focusing on it", held)
         journal.write(

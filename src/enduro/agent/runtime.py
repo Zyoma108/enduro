@@ -123,11 +123,15 @@ class AgentConfig:
     min_wake_gap_position_s: int = 15
     min_check_flat_s: int = 120  # no position: scheduled checks no more often than this
     show_positioning: bool = True  # open interest and funding in the focus view
-    # Wake the agent (when flat) on an impulse: a 5m break of the 2h range on at least this
-    # many times the coin's average volume of the day; 0 turns it off.
+    # Wake the agent on an impulse (while there is room for another position): a 5m break
+    # of the 2h range on at least this many times the coin's average volume of the day;
+    # 0 turns it off.
     impulse_volume_vs_24h: float = 10.0
     impulse_cooldown_min: int = 60  # per coin and direction
     min_stop_atr: float = 1.5  # open_position refuses stops nearer than this (0 = off)
+    # The risk layer's limit: with more than one, the agent may move its focus to a new coin
+    # and leave an open position under its exchange-side stop (a "parked" position).
+    max_positions: int = 1
     notes_in_context: int = 10
     feedback_in_context: int = 15
     radar_rows_in_context: int = 10
@@ -189,7 +193,8 @@ class AgentRuntime:
         self._wake_reason = "start"
         self._last_tick_mid: float | None = None
         self._last_tick_end_ms = 0
-        self._had_position = False
+        self._had_position = False  # on the focus symbol
+        self._held: set[str] = set()  # symbols with an open position, focus or parked
         self.alerts = alerts or AlertBook()
         self._fired_alerts: list[FiredAlert] = []
         self._impulses: list[Impulse] = []  # recent, newest last
@@ -388,9 +393,13 @@ class AgentRuntime:
     async def set_focus(self, symbol: str, reason: str) -> None:
         if self.focus_symbol and self.focus_symbol != symbol:
             if await self.has_open_position(self.focus_symbol):
-                raise ToolInputError(
-                    f"close the position on {self.focus_symbol} before switching focus"
-                )
+                held = {p["symbol"] for p in (await self.trading.account())["positions"]}
+                if symbol not in held and len(held) >= self.config.max_positions:
+                    raise ToolInputError(
+                        f"close the position on {self.focus_symbol} before switching focus "
+                        f"({len(held)} open, limit {self.config.max_positions})"
+                    )
+                self._held = held  # the old focus stays open, parked: watched for its close
             self.tracker.drop(self.focus_symbol)
         refocus = self.focus_symbol == symbol
         self.focus_symbol = symbol
@@ -535,15 +544,15 @@ class AgentRuntime:
                 continue
             self._impulses.append(impulse)
             self.journal.write("impulse", impulse=impulse)
-            if not self._had_position:
+            if symbol not in self._held and len(self._held) < self.config.max_positions:
                 self._new_impulses.append(impulse)
 
     def _wake_on_fired_alerts(self) -> None:
         # A wake-up set during a tick would be cleared when it ends: keep them until then.
         if not (self._fired_alerts or self._new_impulses) or self._in_tick:
             return
-        if self._had_position:
-            self._new_impulses = []  # a new coin cannot be traded while in a position
+        if len(self._held) >= self.config.max_positions:
+            self._new_impulses = []  # no room for a new coin
         reasons = [f.describe() for f in self._fired_alerts]
         reasons += [i.describe() for i in self._new_impulses]
         self._fired_alerts, self._new_impulses = [], []
@@ -562,7 +571,9 @@ class AgentRuntime:
         while True:
             await asyncio.sleep(2)
             polls += 1
-            if self.focus_symbol is None or self._wake.is_set() or self._in_tick:
+            if self._wake.is_set() or self._in_tick:
+                continue
+            if self.focus_symbol is None and not self._held:
                 continue
             try:
                 await self._watch_once(polls)
@@ -571,6 +582,13 @@ class AgentRuntime:
                     log.warning("watchdog poll failed: %s: %s", type(e).__name__, e)
 
     async def _watch_once(self, polls: int) -> None:
+        if self.focus_symbol is not None and self._watch_focus_price():
+            return
+        if self._held and polls % 5 == 0:  # positions: every ~10 s
+            await self._watch_positions()
+
+    def _watch_focus_price(self) -> bool:
+        """Wake on a sharp move of the focus coin since the last check."""
         assert self.focus_symbol is not None
         gap_s = (
             self.config.min_wake_gap_position_s
@@ -590,13 +608,22 @@ class AgentRuntime:
                     f"(wake threshold {threshold:.0f} bps)"
                 )
                 self._wake.set()
-                return
-        if self._had_position and polls % 5 == 0:  # positions: every ~10 s
-            if not await self.has_open_position(self.focus_symbol):
-                self._wake_reason = "position closed on the exchange (stop or take profit)"
-                self._wake.set()
-            elif self.trails:
-                await self._trail_once()
+                return True
+        return False
+
+    async def _watch_positions(self) -> None:
+        """Wake when the exchange closed a position (focus or parked); move trailing stops."""
+        held = {p["symbol"] for p in (await self.trading.account())["positions"]}
+        if closed := self._held - held:
+            self._held = held
+            self._had_position = self.focus_symbol in held
+            self._wake_reason = (
+                "position closed on the exchange (stop or take profit): "
+                + ", ".join(sorted(closed))
+            )
+            self._wake.set()
+        elif self.trails:
+            await self._trail_once()
 
     def set_trail(self, symbol: str, side: str, distance: float) -> None:
         key = (symbol, side)
@@ -669,7 +696,7 @@ class AgentRuntime:
         except Exception as e:  # never let bookkeeping after the episode kill the agent
             log.error("tick %d: market state: %s: %s", self.tick_no, type(e).__name__, e)
             self.journal.write("error", what="market state", error=f"{type(e).__name__}: {e}")
-        if not self._had_position:
+        if not (self._held or self._had_position):
             # Flat: scheduled checks are spaced out to save model usage; a sharp move
             # still wakes the agent through the watchdog.
             self._next_check_ms = max(
@@ -700,12 +727,13 @@ class AgentRuntime:
             snap = self.tracker.snapshot(self.focus_symbol, now_ms())
             if snap and self.execution in snap.book:
                 self._last_tick_mid = snap.book[self.execution].mid
-            try:
-                self._had_position = await self.has_open_position(self.focus_symbol)
-            except Exception as e:  # keep the last known state; the watchdog retries
-                log.warning("cannot check the position: %s: %s", type(e).__name__, e)
-        else:
-            self._had_position = False
+        try:
+            account = await self.trading.account()
+        except Exception as e:  # keep the last known state; the watchdog retries
+            log.warning("cannot check the position: %s: %s", type(e).__name__, e)
+            return
+        self._held = {p["symbol"] for p in account["positions"]}
+        self._had_position = self.focus_symbol in self._held
 
     async def _sync_closed_trades(self) -> list[dict[str, Any]]:
         """Journal positions the exchange closed since we last looked — stops, take
@@ -883,6 +911,14 @@ class AgentRuntime:
             parts += [
                 f"- {s} {side}: {d * 100:.2f}% from the best price since set"
                 for (s, side), d in self.trails.items()
+            ]
+        if parked := sorted({p["symbol"] for p in account["positions"]} - {self.focus_symbol}):
+            parts += [
+                "",
+                f"## Parked positions (outside the focus): {', '.join(parked)}",
+                "Their exchange-side stop, take profit and trailing stop keep working; you are "
+                "woken if one closes. Manage them by passing `symbol` to close_position / "
+                "update_protection, or set_focus back on the coin to watch its flow.",
             ]
         if mode == "focus":
             parts += [

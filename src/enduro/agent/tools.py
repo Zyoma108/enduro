@@ -226,17 +226,25 @@ def _check_stop_room(rt: AgentRuntime, symbol: str, stop: float) -> None:
         )
 
 
-async def close_position(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
-    if rt.focus_symbol is None:
+async def _position_symbol(rt: AgentRuntime, args: dict[str, Any]) -> str:
+    """The focus coin, or a parked position's coin passed as `symbol`."""
+    symbol = str(args.get("symbol") or "") or rt.focus_symbol
+    if symbol is None:
         raise ToolInputError("no focus symbol")
+    if symbol != rt.focus_symbol and not await rt.has_open_position(symbol):
+        raise ToolInputError(f"no open position on {symbol} (only the focus or a parked one)")
+    return symbol
+
+
+async def close_position(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
+    symbol = await _position_symbol(rt, args)
     return await rt.trading.close(
-        rt.focus_symbol, _side(args), reason=_text(args, "reason"), urgent=bool(args.get("urgent"))
+        symbol, _side(args), reason=_text(args, "reason"), urgent=bool(args.get("urgent"))
     )
 
 
 async def update_protection(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
-    if rt.focus_symbol is None:
-        raise ToolInputError("no focus symbol")
+    symbol = await _position_symbol(rt, args)
     side = _side(args)
     stop = _num(args, "stop_loss", required=False)
     take = _num(args, "take_profit", required=False)
@@ -245,11 +253,11 @@ async def update_protection(rt: AgentRuntime, args: dict[str, Any]) -> dict[str,
         raise ToolInputError("give stop_loss, take_profit and/or trail_pct")
     result: dict[str, Any] = {}
     if stop is not None or take is not None:
-        result = await rt.trading.protect(rt.focus_symbol, side, stop, take)
+        result = await rt.trading.protect(symbol, side, stop, take)
     if trail is not None:
-        if not await rt.has_open_position(rt.focus_symbol):
-            raise ToolInputError(f"no open {side} position on {rt.focus_symbol} to trail")
-        rt.set_trail(rt.focus_symbol, side, trail)
+        if not await rt.has_open_position(symbol):
+            raise ToolInputError(f"no open {side} position on {symbol} to trail")
+        rt.set_trail(symbol, side, trail)
         result["trailing_stop_pct"] = round(trail * 100, 3) if trail else "removed"
     return result
 
@@ -328,6 +336,10 @@ async def finish_tick(rt: AgentRuntime, args: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------- registry
 
 _SIDE = {"type": "string", "enum": ["long", "short"]}
+_PARKED = {
+    "type": "string",
+    "description": "A parked position's coin (open, outside the focus); omit for the focus coin",
+}
 _TRAIL = {
     "type": "number",
     "minimum": 0,
@@ -390,7 +402,9 @@ TOOLS: list[Tool] = [
         ToolSpec(
             "set_focus",
             "Start focusing on one coin from the radar universe: live trades and order "
-            "books start streaming and the agent switches to focus mode.",
+            "books start streaming and the agent switches to focus mode. An open position "
+            "on the previous focus coin stays open, parked under its exchange-side "
+            "protection, while the open-position limit leaves room for a new one.",
             _schema(
                 {"symbol": {"type": "string"}, "reason": {"type": "string"}},
                 ["symbol", "reason"],
@@ -442,11 +456,16 @@ TOOLS: list[Tool] = [
     Tool(
         ToolSpec(
             "close_position",
-            "Close the whole position on the focus coin: a post-only limit order at the "
-            "best price for a few seconds (maker fee), then market for whatever is left. "
-            "urgent=true closes at market at once.",
+            "Close the whole position on the focus coin (or a parked one: pass `symbol`): "
+            "a post-only limit order at the best price for a few seconds (maker fee), then "
+            "market for whatever is left. urgent=true closes at market at once.",
             _schema(
-                {"side": _SIDE, "reason": {"type": "string"}, "urgent": {"type": "boolean"}},
+                {
+                    "side": _SIDE,
+                    "reason": {"type": "string"},
+                    "urgent": {"type": "boolean"},
+                    "symbol": _PARKED,
+                },
                 ["side", "reason"],
             ),
         ),
@@ -458,13 +477,15 @@ TOOLS: list[Tool] = [
             "Move the stop loss and/or take profit of an open position (0 removes the "
             "take profit), or set / change / remove a trailing stop (trail_pct). A stop "
             "can be tightened freely; loosening it is allowed only "
-            "within the per-trade risk budget; it can never be removed.",
+            "within the per-trade risk budget; it can never be removed. Acts on the focus "
+            "coin, or on a parked position when `symbol` is given.",
             _schema(
                 {
                     "side": _SIDE,
                     "stop_loss": {"type": "number"},
                     "take_profit": {"type": "number"},
                     "trail_pct": _TRAIL,
+                    "symbol": _PARKED,
                 },
                 ["side"],
             ),

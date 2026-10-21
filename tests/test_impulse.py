@@ -56,6 +56,30 @@ async def test_impulse_wakes_a_flat_agent_once_and_is_listed(tmp_path, monkeypat
     assert not rt._wake.is_set() and len(rt._impulses) == 1
 
 
+async def test_impulse_wakes_an_agent_in_a_position_only_with_room_for_another(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("enduro.agent.runtime.now_ms", lambda: T0 + 306 * 60_000)
+    config = AgentConfig(impulse_volume_vs_24h=10, max_positions=1)
+    rt, *_ = runtime(tmp_path, ScriptedLLM([]), config)
+    rt._held = {"ETH/USDT:USDT"}
+    rt.radar.radar.by_symbol["SOL/USDT:USDT"] = quiet() + [
+        bar(300 + i, 100.5 + i * 0.3, volume=30.0) for i in range(5)
+    ]
+    rt._check_alerts()
+    assert not rt._wake.is_set() and len(rt._impulses) == 1  # listed, but no room
+
+    rt, *_ = runtime(
+        tmp_path, ScriptedLLM([]), AgentConfig(impulse_volume_vs_24h=10, max_positions=2)
+    )
+    rt._held = {"ETH/USDT:USDT"}
+    rt.radar.radar.by_symbol["SOL/USDT:USDT"] = quiet() + [
+        bar(300 + i, 100.5 + i * 0.3, volume=30.0) for i in range(5)
+    ]
+    rt._check_alerts()
+    assert rt._wake.is_set() and "impulse up on SOL/USDT:USDT" in rt._wake_reason
+
+
 async def test_trailing_stop_follows_the_best_price_only_in_profit(tmp_path):
     rt, trading, *_ = runtime(tmp_path, ScriptedLLM([]))
     position = SimpleNamespace(
