@@ -102,7 +102,8 @@ class TradingService:
             "positions": [await self._position_view(p) for p in positions],
             "risk": {
                 "kill_switch": state.halted,
-                "daily_loss_pct": round(state.daily_loss_pct(balance.equity), 2),
+                # Signed so a profit reads as profit: "daily_loss_pct": -3.9 was read as a loss.
+                "daily_pnl_pct": round(-state.daily_loss_pct(balance.equity), 2),
                 "daily_loss_limit_pct": limits.daily_loss_limit_pct,
                 "drawdown_from_peak_pct": round(state.drawdown_pct(balance.equity), 2),
                 "max_drawdown_pct": limits.max_drawdown_pct,
