@@ -68,7 +68,8 @@ max_open_positions = 2
 # На demo 5%, для live — пересмотреть.
 daily_loss_limit_pct = 5.0
 # Просадка от пика капитала: kill-switch, снимается только вручную (enduro risk --reset).
-max_drawdown_pct = 10.0
+# На demo 15% (2026-10-28, пользователь разрешил двигать); для live — пересмотреть.
+max_drawdown_pct = 15.0
 # Не больше сделок в час.
 max_trades_per_hour = 6
 # Состояние риск-менеджера (пик, начало дня, kill-switch) — переживает перезапуски.
